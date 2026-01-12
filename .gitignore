@@ -4,4 +4,6 @@
 *.o
 *.bin
 *.map
-os.img
+*.img
+*.elf
+*.img

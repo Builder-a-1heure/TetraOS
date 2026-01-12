@@ -2,6 +2,10 @@
 #include "screen.h"
 #include "ui.h"
 
+
+/* A synchroniser avec reAPFS.c*/
+#define MAX_DIR_ENTRIES 32
+
 void fs_draw_ls(void) {
     const char *cwd = fs_get_cwd();
 
