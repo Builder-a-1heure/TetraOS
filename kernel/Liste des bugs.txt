@@ -1,0 +1,15 @@
+Liste des bugs a regler :
+
+ - 1 : écriture qui merde mais par contre write sector ok, mais rien sur le disk, pas d'erreur ata déclaré par l'OS (probablement qemu qui suporte pas les ports ata ...)
+
+ - 2 : la commande write est foiré pour quitter avec le ctrl + C et le retour a la ligne aussi (le curseur fait un espace mais on écrit pos 1 de l'écran a la ligne en bas)
+
+ - 3 : le sl est foiré, hyperloop a l'envers et qui bug a la fin
+
+ - 4 : le system de fichier est plat alors que je veut un systeme hiérarchique ...
+
+ - 5 : la commande ls donne la FS table uniquement, je veux que la commande fs affiche non seulement le system de fichier complet, mais aussi avec les ordres hiérarchique (enfant en bas des parents décalé de 2 espace a droite)
+
+ - 6 : la commande cat remonte une erreur (logique si l'écriture est foiré)
+
+ - 7 = le save des fichier est a revoir totalement (il save les fichiers a la place du bootloader sur le premier secteur)

@@ -2,9 +2,9 @@
 setlocal enabledelayedexpansion
 
 REM === CONFIGURATION ===
-set GCC=i686\bin\i686-elf-gcc
-set LD=i686\bin\i686-elf-ld
-set OBJCOPY=i686\bin\i686-elf-objcopy
+set GCC="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-gcc"
+set LD="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-ld"
+set OBJCOPY="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-objcopy"
 set NASM=nasm
 set QEMU="qemu\qemu-system-i386.exe"
 
@@ -23,7 +23,7 @@ if errorlevel 1 goto error
 
 REM === COMPILATION DU KERNEL ===
 echo Compilation des fichiers du kernel...
-set FILES=main input reapfs screen utils ata boot_info mem_boot ui
+set FILES=main input fs screen utils ata boot_info mem_boot
 
 for %%f in (%FILES%) do (
     echo Compilation de kernel\%%f.c...
@@ -46,13 +46,12 @@ echo Linking du kernel...
 %LD% -T kernel\linker.ld -o kernel.elf -Map kernel.map ^
 kernel\main.o ^
 kernel\input.o ^
-kernel\reapfs.o ^
+kernel\fs.o ^
 kernel\screen.o ^
 kernel\utils.o ^
 kernel\ata.o ^
 kernel\boot_info.o ^
 kernel\mem_boot.o ^
-kernel\ui.o ^
 kernel\src\mem\pfa.o
 
 

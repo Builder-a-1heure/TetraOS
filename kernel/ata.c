@@ -30,17 +30,6 @@ static int wait_bsy_clear(int timeout) {
     return -1;
 }
 
-// Attente que DRQ soit prêt, avec gestion BSY/ERR
-static int ata_wait_drq(int timeout) {
-    while (--timeout) {
-        uint8_t status = inb(ATA_STATUS);
-        if (status & ATA_ERR) return -1;
-        if (!(status & ATA_BSY) && (status & ATA_DRQ)) return 0;
-        io_wait();
-    }
-    return -2;
-}
-
 void ata_init(void) {
     print_string("ATA: initialisation...\n");
 
@@ -80,29 +69,41 @@ void ata_init(void) {
     outb(ATA_COMMAND, 0xEC);  // IDENTIFY command
     io_wait();
 
-    if (ata_wait_drq(1000000) != 0) {
-        print_string("ATA: identify failed (timeout/err)\n");
+    // Attend que le disque soit prêt
+    int timeout = 1000000;
+    while (--timeout) {
+        status = inb(ATA_STATUS);
+        if (status & ATA_ERR) {
+            print_string("ATA: error during identify\n");
+            return;
+        }
+        if (status & ATA_DRQ) break;  // Data ready
+    }
+
+    if (timeout == 0) {
+        print_string("ATA: timeout during identify\n");
         return;
     }
 
+    // Si on arrive ici, le disque a répondu!
     print_string("ATA: disque detecte et identifie!\n");
 
+    // Lecture des données d'identification (512 bytes)
     for (int i = 0; i < 256; i++) {
         uint16_t data = inw(ATA_DATA);
-        (void)data;
+        // Vous pouvez traiter les données ici si besoin
     }
 
     print_string("ATA: disque pret\n");
 }
 
 int ata_read_single(uint32_t lba, uint8_t* buffer) {
+    //print_string("+++ ATA: in ata_read_single\n");
+    // select drive master + LBA bits
     outb(ATA_DRIVE_SEL, 0xE0 | ((lba >> 24) & 0x0F));
     io_wait();
 
-    if (wait_bsy_clear(100000) != 0) { 
-        print_string("ATA: busy after select\n"); 
-        return -1; 
-    }
+    if (wait_bsy_clear(100000) != 0) { print_string("ATA: busy after select\n"); return -1; }
 
     outb(ATA_SECT_COUNT, 1);
     outb(ATA_LBA_LOW,  (uint8_t)(lba & 0xFF));
@@ -110,10 +111,13 @@ int ata_read_single(uint32_t lba, uint8_t* buffer) {
     outb(ATA_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
     outb(ATA_COMMAND, 0x20); // READ SECTORS
 
-    if (ata_wait_drq(1000000) != 0) {
-        print_string("ATA: timeout or error (read DRQ)\n");
-        return -1;
+    int timeout = 1000000;
+    while (--timeout) {
+        uint8_t status = inb(ATA_STATUS);
+        if (status & ATA_ERR) { print_string("ATA read error (status ERR)\n"); return -1; }
+        if (status & ATA_DRQ) break;
     }
+    if (timeout == 0) { print_string("ATA timeout (read DRQ)\n"); return -1; }
 
     for (int i = 0; i < 256; i++) {
         uint16_t data = inw(ATA_DATA);
@@ -124,13 +128,11 @@ int ata_read_single(uint32_t lba, uint8_t* buffer) {
 }
 
 int ata_write_single(uint32_t lba, const uint8_t* buffer) {
+    //print_string("+++ ATA: in ata_write_single\n");
     outb(ATA_DRIVE_SEL, 0xE0 | ((lba >> 24) & 0x0F));
     io_wait();
 
-    if (wait_bsy_clear(100000) != 0) { 
-        print_string("ATA: busy after select\n"); 
-        return -1; 
-    }
+    if (wait_bsy_clear(100000) != 0) { print_string("ATA: busy after select\n"); return -1; }
 
     outb(ATA_SECT_COUNT, 1);
     outb(ATA_LBA_LOW,  lba & 0xFF);
@@ -138,20 +140,31 @@ int ata_write_single(uint32_t lba, const uint8_t* buffer) {
     outb(ATA_LBA_HIGH, (lba >> 16) & 0xFF);
     outb(ATA_COMMAND,  0x30);  // WRITE SECTOR
 
-    if (ata_wait_drq(1000000) != 0) {
-        print_string("ATA: timeout or error (write DRQ)\n");
-        return -1;
+    int timeout = 1000000;
+    while (--timeout) {
+        uint8_t status = inb(ATA_STATUS);
+        if (status & ATA_ERR) { print_string("ATA write error (during DRQ)\n"); return -1; }
+        if (!(status & ATA_BSY) && (status & ATA_DRQ)) break;
     }
+    if (timeout == 0) { print_string("ATA timeout (write DRQ)\n"); return -1; }
 
     for (int i = 0; i < 256; i++) {
         uint16_t data = (buffer[i * 2 + 1] << 8) | buffer[i * 2];
         outw(ATA_DATA, data);
     }
 
-    if (wait_bsy_clear(1000000) != 0) {
-        print_string("ATA: timeout (write finish)\n");
-        return -1;
+    // wait write completion
+    timeout = 1000000;
+    while (--timeout) {
+        uint8_t status = inb(ATA_STATUS);
+        if (status & ATA_ERR) { print_string("ATA write error (finish)\n"); return -1; }
+        if (!(status & ATA_BSY)) break;
     }
+    if (timeout == 0) { print_string("ATA timeout (write finish)\n"); return -1; }
+
+    // Optionnel sur vrai disque : flush cache
+    // outb(ATA_COMMAND, 0xE7);
+    // wait...
 
     return 0;
 }

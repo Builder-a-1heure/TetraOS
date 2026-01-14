@@ -1,11 +1,5 @@
 #include "screen.h"
 
-#define SCREEN_WIDTH  80
-#define SCREEN_HEIGHT 25
-#define VIDEO_MEMORY  0xB8000
-#define DEFAULT_COLOR 0x0F  // Blanc sur noir
-
-
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -188,48 +182,4 @@ void clear_area(int x1, int y1, int x2, int y2) {
             video[get_offset(y, x)+1] = WHITE_ON_BLACK;
         }
     }
-}
-
-
-static inline uint16_t *vram(void) {
-    return (uint16_t *)VIDEO_MEMORY;
-}
-
-// Écrit une chaîne à une position x/y donnée
-void print_xy(int x, int y, const char *text) {
-    if (x < 0 || y < 0 || x >= SCREEN_WIDTH || y >= SCREEN_HEIGHT)
-        return;
-    uint16_t *video = vram();
-    video += y * SCREEN_WIDTH + x;
-    while (*text) {
-        *video++ = ((uint16_t)DEFAULT_COLOR << 8) | *text++;
-    }
-}
-
-// Efface une zone rectangulaire
-void screen_fill_rect(int x, int y, int w, int h, char c) {
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x + w > SCREEN_WIDTH)  w = SCREEN_WIDTH - x;
-    if (y + h > SCREEN_HEIGHT) h = SCREEN_HEIGHT - y;
-    uint16_t *video = vram();
-    for (int j = 0; j < h; ++j) {
-        for (int i = 0; i < w; ++i) {
-            video[(y + j) * SCREEN_WIDTH + (x + i)] =
-                ((uint16_t)DEFAULT_COLOR << 8) | c;
-        }
-    }
-}
-
-// Nettoie une ligne entière
-void clear_line(int y) {
-    if (y < 0 || y >= SCREEN_HEIGHT) return;
-    uint16_t *video = vram() + y * SCREEN_WIDTH;
-    for (int i = 0; i < SCREEN_WIDTH; ++i)
-        video[i] = ((uint16_t)DEFAULT_COLOR << 8) | ' ';
-}
-
-// Retourne la largeur de l'écran (utile pour placer ton FS à droite)
-int screen_get_width(void) {
-    return SCREEN_WIDTH;
 }
