@@ -25,27 +25,27 @@ void start(void) {
     );
 }
 
-const char boot_msg[] __attribute__((section(".rodata"))) = "Démarrage...\n";
+const char boot_msg[] __attribute__((section(".rodata"))) = "Demarrage...\n";
 
 void windowed_write(const char* filename);
 void tetra_shell(void);
 
 void kmain(void) {
-    print_string("ÉTAPE 1 : Début kmain()\n");
+    print_string("ETAPE 1 : Debut kmain()\n");
 
-    print_string("ÉTAPE 2 : Initialisation écran\n");
+    print_string("ETAPE 2 : Initialisation ecran\n");
     clear_screen();
 
-    print_string("ÉTAPE 3 : Initialisation ATA\n");
+    print_string("ETAPE 3 : Initialisation ATA\n");
     ata_init();
 
-    print_string("ÉTAPE 4 : Initialisation système de fichiers\n");
+    print_string("ETAPE 4 : Initialisation systeme de fichiers\n");
     fs_init();
 
-    print_string("ÉTAPE 5 : Lancement du shell\n");
+    print_string("ETAPE 5 : Lancement du shell\n");
     tetra_shell();
 
-    print_string("ÉTAPE 6 : Retour du shell (anormal)\n");
+    print_string("ETAPE 6 : Retour du shell (anormal)\n");
     while(1) { asm volatile ("nop"); }
 }
 
@@ -73,12 +73,12 @@ static void draw_train_at(void) {
     while (1) {
         clear_screen();
 
-        // Vérifie si une touche est pressée
+        // Verifie si une touche est pressee
         if (keyboard_get_char() != 0) {
             break;
         }
 
-        // Affiche le train avec décalage
+        // Affiche le train avec decalage
         for (int i = 0; i < h; i++) {
             for (int sp = 0; sp < pos; sp++) {
                 print_char(' ');
@@ -111,7 +111,7 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
     int height = 10;
     int start_x = (80 - width) / 2;
     int start_y = (25 - height) / 2;
-
+    
     for (int y = start_y; y <= start_y + height; y++) {
         for (int x = start_x; x <= start_x + width; x++) {
             if (y == start_y || y == start_y + height ||
@@ -126,7 +126,7 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
     }
 
     set_cursor(start_y, start_x + 2);
-    print_string("Édition : ");
+    print_string("edition : ");
     print_string(filename);
 
     int content_y = start_y + 2;
@@ -145,7 +145,7 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
     }
 
     set_cursor(start_y + height - 2, start_x + 2);
-    print_string("ÉCHAP:Sauvegarder  Ctrl+C:Annuler");
+    print_string("ECHAP:Sauvegarder  Ctrl+C:Annuler");
 
     int cursor_x = start_x + 2 + (cursor_pos % max_chars);
     int cursor_y = content_y + (cursor_pos / max_chars);
@@ -167,7 +167,7 @@ void windowed_write(const char* filename) {
         strncpy(content, (char*)existing_data, sizeof(content) - 1);
         cursor_pos = strlen(content);
     }
-
+    clear_screen();
     while (1) {
         draw_editor_window(filename, content, cursor_pos);
 
@@ -176,14 +176,14 @@ void windowed_write(const char* filename) {
         if (c == 27) {
             fs_write_file(filename, (uint8_t*)content, strlen(content));
             clear_screen();
-            print_string("Fichier sauvegardé : ");
+            print_string("Fichier sauvegarde : ");
             print_string(filename);
             print_string("\n");
             break;
         }
         else if (c == 3) {
             clear_screen();
-            print_string("Édition annulée\n");
+            print_string("edition annulee\n");
             break;
         }
         else if (c == '\b' && cursor_pos > 0) {
@@ -288,15 +288,15 @@ void tetra_shell(void) {
             print_string("  tree            - Afficher l'arborescence\n");
             print_string("  cd <dossier>    - Changer de dossier\n");
             print_string("  pwd             - Afficher le dossier courant\n");
-            print_string("  mkdir <nom>     - Créer un dossier\n");
-            print_string("  touch <nom>     - Créer un fichier vide\n");
-            print_string("  edit <fichier>  - Éditer un fichier (crée si nécessaire)\n");
+            print_string("  mkdir <nom>     - Creer un dossier\n");
+            print_string("  touch <nom>     - Creer un fichier vide\n");
+            print_string("  edit <fichier>  - editer un fichier (cree si necessaire)\n");
             print_string("  cat <fichier>   - Afficher le contenu d'un fichier\n");
             print_string("  rm <nom>        - Supprimer un fichier/dossier\n");
-            print_string("  clear           - Effacer l'écran\n");
-            print_string("  info            - Afficher les informations du système de fichiers\n");
+            print_string("  clear           - Effacer l'ecran\n");
+            print_string("  info            - Afficher les informations du systeme de fichiers\n");
             print_string("  sl              - Animation amusante\n");
-            print_string("  shutdown        - Éteindre le système\n");
+            print_string("  shutdown        - eteindre le systeme\n");
         }
 else if (strcmp(s, "shutdown") == 0) {
     clear_screen();
@@ -309,7 +309,7 @@ else if (strcmp(s, "shutdown") == 0) {
     print_string("   | $$|  $$$$$$$  |  $$$$/| $$     |  $$$$$$$|  $$$$$$/|  $$$$$$/ \n");
     print_string("   |__/ \\_______/   \\___/  |__/      \\_______/ \\______/  \\______/  \n");
     print_string("\n");
-    print_string("Extinction du système en cours...\n");
+    print_string("Extinction du systeme en cours...\n");
 
     delay_spin(120000000);
     outw(0x604, 0x2000);
@@ -343,22 +343,22 @@ else if (strcmp(s, "shutdown") == 0) {
             char *name = (char*)(s + 6);
             while (*name == ' ') name++;
             if (fs_mkdir(name) >= 0) {
-                print_string("Dossier créé : ");
+                print_string("Dossier cree : ");
                 print_string(name);
                 print_string("\n");
             } else {
-                print_string("mkdir : échec (existe déjà ou système de fichiers plein)\n");
+                print_string("mkdir : echec (existe dejà ou systeme de fichiers plein)\n");
             }
         }
         else if (strncmp(s, "touch ", 6) == 0) {
             char *name = (char*)(s + 6);
             while (*name == ' ') name++;
             if (fs_add(name) >= 0) {
-                print_string("Fichier créé : ");
+                print_string("Fichier cree : ");
                 print_string(name);
                 print_string("\n");
             } else {
-                print_string("touch : échec (existe déjà ou système de fichiers plein)\n");
+                print_string("touch : echec (existe dejà ou systeme de fichiers plein)\n");
             }
         }
         else if (strncmp(s, "edit ", 5) == 0) {
@@ -367,11 +367,11 @@ else if (strcmp(s, "shutdown") == 0) {
 
             int idx = fs_find(name);
             if (idx < 0) {
-                print_string("Création d'un nouveau fichier : ");
+                print_string("Creation d'un nouveau fichier : ");
                 print_string(name);
                 print_string("\n");
                 if (fs_add(name) < 0) {
-                    print_string("edit : échec lors de la création du fichier\n");
+                    print_string("edit : echec lors de la creation du fichier\n");
                     continue;
                 }
             }
@@ -403,7 +403,7 @@ else if (strcmp(s, "shutdown") == 0) {
             while (*name == ' ') name++;
 
             if (fs_delete(name) == 0) {
-                print_string("Supprimé : ");
+                print_string("Supprime : ");
                 print_string(name);
                 print_string("\n");
             } else {
