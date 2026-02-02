@@ -23,7 +23,7 @@ if errorlevel 1 goto error
 
 REM === COMPILATION DU KERNEL ===
 echo Compilation des fichiers du kernel...
-set FILES=main input fs screen utils ata boot_info mem_boot
+set FILES=main input fs screen utils ata boot_info mem_boot tex
 
 for %%f in (%FILES%) do (
     echo Compilation de kernel\%%f.c...
@@ -52,6 +52,7 @@ kernel\utils.o ^
 kernel\ata.o ^
 kernel\boot_info.o ^
 kernel\mem_boot.o ^
+kernel\tex.o ^
 kernel\src\mem\pfa.o
 
 
