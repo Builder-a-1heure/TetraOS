@@ -162,10 +162,10 @@ static void pos_to_line_col(const char* content, int pos, int* out_line, int* ou
 }
 
 void draw_editor_window(const char* filename, const char* content, int cursor_pos, int scroll_offset) {
-    int width = 60;
-    int height = 10;
-    int start_x = (80 - width) / 2;
-    int start_y = (25 - height) / 2;
+    int width = 76;   // 80 - 4 pour les marges
+    int height = 21;  // 25 - 4 pour titre et aide
+    int start_x = 2;
+    int start_y = 1;
     int content_height = height - 4;
     int content_width = width - 4;
     
@@ -227,7 +227,7 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
 
     // Barre d'aide en bas
     set_cursor(start_y + height - 2, start_x + 2);
-    print_string("ECHAP:Sauvegarder  Ctrl+C:Annuler");
+    print_string("Fleches:Deplacer ECHAP:Sauver Ctrl+C:Annuler");
 
     // Positionner le curseur
     int cursor_line, cursor_col;
@@ -248,8 +248,8 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
 void windowed_write(const char* filename) {
     char content[1024] = {0};
     int cursor_pos = 0;
-    int width = 60;
-    int height = 10;
+    int width = 76;
+    int height = 21;
     int content_width = width - 4;
     int content_height = height - 4;
     int scroll_offset = 0;
@@ -295,6 +295,49 @@ void windowed_write(const char* filename) {
             print_string("edition annulee\n");
             break;
         }
+        else if (c == 1) {  // Flèche haut
+            // Remonter d'une ligne
+            int cursor_line, cursor_col;
+            pos_to_line_col(content, cursor_pos, &cursor_line, &cursor_col);
+            
+            if (cursor_line > 0) {
+                // Trouver le début de la ligne précédente
+                const char* prev_line = get_line_start(content, cursor_line - 1);
+                if (prev_line) {
+                    int prev_line_len = get_line_length(prev_line);
+                    // Positionner au même offset dans la ligne précédente (ou à la fin)
+                    int target_col = cursor_col < prev_line_len ? cursor_col : prev_line_len;
+                    cursor_pos = (prev_line - content) + target_col;
+                }
+            }
+        }
+        else if (c == 2) {  // Flèche bas
+            // Descendre d'une ligne
+            int cursor_line, cursor_col;
+            pos_to_line_col(content, cursor_pos, &cursor_line, &cursor_col);
+            
+            int total_lines = count_lines(content);
+            if (cursor_line < total_lines - 1) {
+                // Trouver le début de la ligne suivante
+                const char* next_line = get_line_start(content, cursor_line + 1);
+                if (next_line) {
+                    int next_line_len = get_line_length(next_line);
+                    // Positionner au même offset dans la ligne suivante (ou à la fin)
+                    int target_col = cursor_col < next_line_len ? cursor_col : next_line_len;
+                    cursor_pos = (next_line - content) + target_col;
+                }
+            }
+        }
+        else if (c == 17) {  // Flèche gauche
+            if (cursor_pos > 0) {
+                cursor_pos--;
+            }
+        }
+        else if (c == 18) {  // Flèche droite
+            if (cursor_pos < (int)strlen(content)) {
+                cursor_pos++;
+            }
+        }
         else if ((c == '\b' || c == 127) && cursor_pos > 0) {  // Backspace ou Delete
             // Supprimer le caractère avant le curseur
             for (int i = cursor_pos - 1; i < (int)strlen(content); i++) {
@@ -331,21 +374,28 @@ void windowed_write(const char* filename) {
 
 void tetra_shell(void) {
     char input[256];
-    print_string("\n");
-    print_string("\n");
-    print_string("   /$$$$$$$$          /$$                         /$$$$$$   /$$$$$$  \n");
-    print_string("  |__  $$__/         | $$                        /$$__  $$ /$$__  $$ \n");
-    print_string("     | $$  /$$$$$$  /$$$$$$    /$$$$$$  /$$$$$$ | $$  \\ $$| $$  \\__/ \n");
-    print_string("     | $$ /$$__  $$|_  $$_/   /$$__  $$|____  $$| $$  | $$|  $$$$$$  \n");
-    print_string("     | $$| $$$$$$$$  | $$    | $$  \\__/ /$$$$$$$| $$  | $$ \\____  $$ \n");
-    print_string("     | $$| $$_____/  | $$ /$$| $$      /$$__  $$| $$  | $$ /$$  \\ $$ \n");
-    print_string("     | $$|  $$$$$$$  |  $$$$/| $$     |  $$$$$$$|  $$$$$$/|  $$$$$$/ \n");
-    print_string("     |__/ \\_______/   \\___/  |__/      \\_______/ \\______/  \\______/  \n");
-    print_string("\n");
-    print_string("========================================\n");
-    print_string("       TetraOS Shell v1.3 (Fr)      \n");
-    print_string("========================================\n");
-    print_string("Tapez 'help' pour la liste des commandes\n\n");
+    
+    // Afficher le contenu du README.txt s'il existe (premier démarrage)
+    uint8_t readme_buffer[2048];
+    int readme_result = fs_read_file("README.txt", readme_buffer, sizeof(readme_buffer) - 1);
+    if (readme_result > 0) {
+        readme_buffer[readme_result] = '\0';
+        print_string((char*)readme_buffer);
+        print_string("\n");
+        print_string("   /$$$$$$$$          /$$                         /$$$$$$   /$$$$$$  \n");
+        print_string("  |__  $$__/         | $$                        /$$__  $$ /$$__  $$ \n");
+        print_string("     | $$  /$$$$$$  /$$$$$$    /$$$$$$  /$$$$$$ | $$  \\ $$| $$  \\__/ \n");
+        print_string("     | $$ /$$__  $$|_  $$_/   /$$__  $$|____  $$| $$  | $$|  $$$$$$  \n");
+        print_string("     | $$| $$$$$$$$  | $$    | $$  \\__/ /$$$$$$$| $$  | $$ \\____  $$ \n");
+        print_string("     | $$| $$_____/  | $$ /$$| $$      /$$__  $$| $$  | $$ /$$  \\ $$ \n");
+        print_string("     | $$|  $$$$$$$  |  $$$$/| $$     |  $$$$$$$|  $$$$$$/|  $$$$$$/ \n");
+        print_string("     |__/ \\_______/   \\___/  |__/      \\_______/ \\______/  \\______/  \n");
+        print_string("\n");
+        print_string("========================================\n");
+        print_string("       TetraOS Shell v1.3 (Fr)      \n");
+        print_string("========================================\n");
+        print_string("Tapez 'help' pour la liste des commandes\n\n");
+    }
 
     while (1) {
         print_string("root@TetraOS:");

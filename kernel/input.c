@@ -8,10 +8,10 @@ int shift_pressed = 0;
 int ctrl_pressed = 0;
 
 unsigned char keyboard_map[256] = {
-    0, 27, '&', 'e', '"', '#', '(', '-', 'e', '_', 'c', 'a', '-', '=', '\b',
-    '\t', 'a', 'z', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '^', '$', '\n',
+    0, 27, '&', 'e', '"', '#', '(', '-', 'e', '_', 'c', 'a', ')', '=', '\b',
+    '\t', 'a', 'z', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '{', '}', '\n',
     0, 'q', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'm', 'u', '*',
-    0, '\\', 'w', 'x', 'c', 'v', 'b', 'n', ',', ')', ':', '!', 0,
+    0, '<', 'w', 'x', 'c', 'v', 'b', 'n', ',', ')', ':', '!', 0,
     '*', 0, ' '
 };
 
@@ -90,7 +90,7 @@ char get_input_char() {
         
         if (scancode < (sizeof(keyboard_map)/sizeof(keyboard_map[0]))) {
             char c = shift_pressed ? keyboard_map_shift[scancode] : keyboard_map[scancode];
-            if (ctrl_pressed && (c == 'c' || c == 'C')) return 3; // /*/*ctrl+c removed*/ removed*/
+            if (ctrl_pressed && (c == 'c' || c == 'C')) return 3;
             if (c) return c;
         }
     }
@@ -107,14 +107,20 @@ char keyboard_get_char() {
         
         // Gestion des touches spéciales
         if (scancode == 0x01) return 27;  // ESC
-        if (scancode == 0x0E) return ''; // Backspace
+        if (scancode == 0x0E) return '\b'; // Backspace
         if (scancode == 0x1D) { ctrl_pressed = 1; continue; } // Ctrl down
         if (scancode == 0x9D) { ctrl_pressed = 0; continue; } // Ctrl up
+        
+        // Flèches directionnelles (codes spéciaux)
+        if (scancode == 0x48) return 1;   // Flèche haut
+        if (scancode == 0x50) return 2;   // Flèche bas
+        if (scancode == 0x4B) return 17;  // Flèche gauche
+        if (scancode == 0x4D) return 18;  // Flèche droite
         
         // Touches normales
         if (scancode < (sizeof(keyboard_map)/sizeof(keyboard_map[0]))) {
             char c = shift_pressed ? keyboard_map_shift[scancode] : keyboard_map[scancode];
-            if (ctrl_pressed && (c == 'c' || c == 'C')) return 3; // /*/*ctrl+c removed*/ removed*/
+            if (ctrl_pressed && (c == 'c' || c == 'C')) return 3;
             if (c) return c;
         }
     }

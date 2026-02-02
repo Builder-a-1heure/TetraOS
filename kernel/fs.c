@@ -5,6 +5,7 @@
 #include "ata.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "tex_doc_content.h"
 
 // Global filesystem state
 FSTable g_fs;
@@ -15,6 +16,10 @@ static uint8_t fs_temp_buffer[FS_TABLE_SECTORS * 512];
 #define MAX_READ_ATTEMPTS 3
 #define SECTORS_PER_BATCH 256
 #define MOVE_CHUNK_SECTORS 128
+
+// Forward declarations
+static int ray64_create_node(const char* name, uint8_t is_dir);
+int fs_write_file(const char* name, const uint8_t* data, uint32_t size);
 
 // Utility: get current timestamp (placeholder - would use RTC in real system)
 static uint64_t ray64_get_timestamp(void) {
@@ -191,6 +196,83 @@ void fs_format(void) {
     }
     
     print_string("RAY64: Format completed\n");
+    
+    // Créer le fichier tex.txt avec la documentation TEX
+    print_string("RAY64: Creating tex.txt documentation...\n");
+    
+    // Créer le fichier tex.txt dans le répertoire racine
+    uint32_t saved_cwd = g_cwd;
+    g_cwd = 0; // Se placer à la racine
+    
+    int tex_idx = ray64_create_node("tex.txt", 0);
+    if (tex_idx >= 0) {
+        // Écrire le contenu de la documentation
+        uint32_t doc_len = strlen(TEX_DOCUMENTATION);
+        fs_write_file("tex.txt", (const uint8_t*)TEX_DOCUMENTATION, doc_len);
+        print_string("RAY64: tex.txt created successfully\n");
+    } else {
+        print_string("RAY64: Warning - failed to create tex.txt\n");
+    }
+    
+    // Créer un fichier README.txt de bienvenue
+    print_string("RAY64: Creating README.txt...\n");
+    const char readme_content[] = 
+        "=======================================\n"
+        "   Bienvenue sur TetraOS v1.3 !       \n"
+        "=======================================\n"
+        "\n"
+        "Ceci est votre premier demarrage.\n"
+        "\n"
+        "Pour commencer :\n"
+        "  - Tapez 'help' pour voir les commandes\n"
+        "  - Tapez 'edit tex.txt' pour lire la doc TEX\n"
+        "  - Tapez 'tex exemple.tex' pour tester TEX\n"
+        "\n"
+        "Le systeme TEX permet d'executer des\n"
+        "scripts personnalises directement dans\n"
+        "TetraOS!\n"
+
+        "=======================================\n";
+    
+    int readme_idx = ray64_create_node("README.txt", 0);
+    if (readme_idx >= 0) {
+        uint32_t readme_len = strlen(readme_content);
+        fs_write_file("README.txt", (const uint8_t*)readme_content, readme_len);
+        print_string("RAY64: README.txt created successfully\n");
+    }
+    
+    // Créer un script d'exemple TEX
+    print_string("RAY64: Creating exemple.tex...\n");
+    const char exemple_content[] = 
+        "// Script exemple pour TEX\n"
+        "// Compteur simple\n"
+        "\n"
+        "clear\n"
+        "io.println(\"=== Exemple TEX ===\")\n"
+        "io.println(\"Programme compteur\")\n"
+        "io.println(\"\")\n"
+        "io.input(\"Entrez max: \", max)\n"
+        "\n"
+        "var i = 0\n"
+        "if i < max {\n"
+        "  io.print(\"Compteur: \")\n"
+        "  io.println(i)\n"
+        "  i = i + 1\n"
+        "}\n"
+        "\n"
+        "io.println(\"\")\n"
+        "io.println(\"Termine!\")\n"
+        "io.println(\"Editez avec: edit exemple.tex\")\n"
+        "exit\n";
+    
+    int exemple_idx = ray64_create_node("exemple.tex", 0);
+    if (exemple_idx >= 0) {
+        uint32_t exemple_len = strlen(exemple_content);
+        fs_write_file("exemple.tex", (const uint8_t*)exemple_content, exemple_len);
+        print_string("RAY64: exemple.tex created successfully\n");
+    }
+    
+    g_cwd = saved_cwd; // Restaurer le répertoire courant
 }
 
 // Initialize RAY64 filesystem
