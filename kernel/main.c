@@ -6,6 +6,7 @@
 #include "io.h"
 #include "ata.h"
 #include "tex.h"
+#include "session.h"
 
 __attribute__((naked)) __attribute__((section(".text.start")))
 void start(void) {
@@ -30,6 +31,7 @@ const char boot_msg[] __attribute__((section(".rodata"))) = "Demarrage...\n";
 
 void windowed_write(const char* filename);
 void tetra_shell(void);
+void read_line(char* buffer, int max_len);
 
 void kmain(void) {
     print_string("ETAPE 1 : Debut kmain()\n");
@@ -43,12 +45,194 @@ void kmain(void) {
     print_string("ETAPE 4 : Initialisation systeme de fichiers\n");
     fs_init();
 
-    print_string("ETAPE 5 : Lancement du shell\n");
-    tetra_shell();
+    print_string("ETAPE 5 : Initialisation systeme de sessions\n");
+    session_init();
+    session_load();
+    
+    // Vérifier s'il y a des sessions
+    int has_sessions = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (g_session_manager.sessions[i].is_active) {
+            has_sessions = 1;
+            break;
+        }
+    }
+    
+    // Si aucune session n'existe, créer une session admin par défaut
+    if (!has_sessions) {
+        clear_screen();
+        print_string("========================================\n");
+        print_string("    PREMIER DEMARRAGE - TetraOS        \n");
+        print_string("========================================\n\n");
+        print_string("Aucune session trouvee.\n");
+        print_string("Creation d'une session administrateur...\n\n");
+        
+        char admin_name[SESSION_NAME_LEN];
+        char admin_password[SESSION_PASSWORD_LEN];
+        
+        print_string("Nom de l'administrateur: ");
+        read_line(admin_name, SESSION_NAME_LEN);
+        
+        print_string("Mot de passe: ");
+        read_line(admin_password, SESSION_PASSWORD_LEN);
+        
+        session_create(admin_name, admin_password, 1);
+        
+        print_string("\nSession admin creee avec succes!\n");
+        print_string("Appuyez sur une touche pour continuer...\n");
+        keyboard_get_char();
+    }
+    
+    // Boucle principale : login -> shell -> logout -> login
+    while (1) {
+        // Afficher le menu de sélection de session
+        int selected_session = session_login_menu();
+        
+        if (selected_session < 0) {
+            print_string("Erreur: Aucune session disponible\n");
+            while(1) { asm volatile ("nop"); }
+        }
+        
+        clear_screen();
+        print_string("========================================\n");
+        print_string("          TetraOS - Connexion           \n");
+        print_string("========================================\n\n");
+        
+        print_string("Session: ");
+        print_string(g_session_manager.sessions[selected_session].name);
+        print_string("\n\n");
+        
+        char password[SESSION_PASSWORD_LEN];
+        print_string("Mot de passe: ");
+        read_line(password, SESSION_PASSWORD_LEN);
+        
+        if (session_login(selected_session, password) == 0) {
+            print_string("\nConnexion reussie!\n");
+            print_string("Bienvenue ");
+            print_string(session_get_current_name());
+            print_string("!\n\n");
+            print_string("Appuyez sur une touche pour continuer...\n");
+            keyboard_get_char();
+            
+            // Lancer le shell
+            tetra_shell();
+            
+            // Si on arrive ici, c'est qu'il y a eu un logout
+            print_string("\nDeconnexion...\n");
+        } else {
+            print_string("\nMot de passe incorrect!\n");
+            print_string("Appuyez sur une touche pour reessayer...\n");
+            keyboard_get_char();
+        }
+    }
 
     print_string("ETAPE 6 : Retour du shell (anormal)\n");
     while(1) { asm volatile ("nop"); }
 }
+
+void read_line(char* buffer, int max_len) {
+    int idx = 0;
+    
+    while (1) {
+        char c = keyboard_get_char();
+        
+        if (c == '\n' || c == '\r') {
+            buffer[idx] = '\0';
+            print_char('\n');
+            break;
+        }
+        else if ((c == '\b' || c == 127) && idx > 0) {
+            idx--;
+            print_string("\b \b");
+        }
+        else if (c >= 32 && c <= 126 && idx < max_len - 1) {
+            buffer[idx++] = c;
+            print_char(c);
+        }
+    }
+}
+
+// ============================================================================
+// COMMANDES DE SESSION
+// ============================================================================
+
+void cmd_adduser(void) {
+    if (!session_has_permission(PERM_SESSION_CREATE)) {
+        print_string("Erreur: Permission refusee (admin requis)\n");
+        return;
+    }
+    
+    char name[SESSION_NAME_LEN];
+    char password[SESSION_PASSWORD_LEN];
+    char is_admin_str[10];
+    
+    print_string("Nom de la session: ");
+    read_line(name, SESSION_NAME_LEN);
+    
+    print_string("Mot de passe: ");
+    read_line(password, SESSION_PASSWORD_LEN);
+    
+    print_string("Admin? (o/n): ");
+    read_line(is_admin_str, 10);
+    
+    uint8_t is_admin = (is_admin_str[0] == 'o' || is_admin_str[0] == 'O') ? 1 : 0;
+    
+    int result = session_create(name, password, is_admin);
+    
+    if (result >= 0) {
+        print_string("Session '");
+        print_string(name);
+        print_string("' creee avec succes!\n");
+    } else {
+        print_string("Erreur: Impossible de creer la session\n");
+    }
+}
+
+void cmd_deluser(void) {
+    if (!session_has_permission(PERM_SESSION_DELETE)) {
+        print_string("Erreur: Permission refusee (admin requis)\n");
+        return;
+    }
+    
+    char name[SESSION_NAME_LEN];
+    
+    print_string("Nom de la session a supprimer: ");
+    read_line(name, SESSION_NAME_LEN);
+    
+    if (strcmp(name, session_get_current_name()) == 0) {
+        print_string("Erreur: Impossible de supprimer votre propre session\n");
+        return;
+    }
+    
+    int result = session_delete(name);
+    
+    if (result == 0) {
+        print_string("Session '");
+        print_string(name);
+        print_string("' supprimee\n");
+    } else {
+        print_string("Erreur: Session non trouvee\n");
+    }
+}
+
+void cmd_users(void) {
+    session_list();
+}
+
+void cmd_whoami(void) {
+    print_string("Session actuelle: ");
+    print_string(session_get_current_name());
+    
+    if (session_is_admin()) {
+        print_string(" [ADMIN]");
+    }
+    
+    print_string("\n");
+}
+
+// ============================================================================
+// FONCTIONS AUXILIAIRES EXISTANTES
+// ============================================================================
 
 static void delay_spin(uint32_t loops) {
     volatile uint32_t x = 0;
@@ -59,45 +243,8 @@ static void delay_spin(uint32_t loops) {
 }
 
 static void draw_train_at(void) {
-    /*const char* steam_locomotive[] = {
-        "  _____            _                       ___     ___ ",
-        " |_   _|   ___    | |_      _ _   __ _    / _ \\   / __|",
-        "   | |    / -_)   |  _|    | '_| / _` |  | (_) |  \\__ \\",
-        "  _|_|_   \\___|   _\\__|   _|_|_  \\__,_|   \\___/   |___/",
-        "_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|",
-        "`-0-0-'`-0-0-'`-0-0-'`-0-0-'`-0-0-'`-0-0-'`-0-0-'"
-    };
-
-    int pos = 0;
-    int h = sizeof(steam_locomotive) / sizeof(steam_locomotive[0]);
-
-    while (1) {
-        clear_screen();
-
-        // Verifie si une touche est pressee
-        if (keyboard_get_char() != 0) {
-            break;
-        }
-
-        // Affiche le train avec decalage
-        for (int i = 0; i < h; i++) {
-            for (int sp = 0; sp < pos; sp++) {
-                print_char(' ');
-            }
-            print_string(steam_locomotive[i]);
-            print_char('\n');
-        }
-
-        pos++;
-        if (pos > 80) {
-            pos = -70;
-        }
-
-        delay_spin(400000);
-    }*/
     print_string("Rayu : CPT pour le moment, deso ...");
 }
-
 
 static void cmd_sl(void) {
     for (int pos = -70; pos < MAX_COLS; pos++) {
@@ -107,7 +254,6 @@ static void cmd_sl(void) {
     }
 }
 
-// Fonction pour compter le nombre de lignes dans le contenu
 static int count_lines(const char* content) {
     int lines = 1;
     for (int i = 0; content[i] != '\0'; i++) {
@@ -118,7 +264,6 @@ static int count_lines(const char* content) {
     return lines;
 }
 
-// Fonction pour obtenir le début d'une ligne spécifique
 static const char* get_line_start(const char* content, int line_number) {
     if (line_number == 0) return content;
     
@@ -134,7 +279,6 @@ static const char* get_line_start(const char* content, int line_number) {
     return NULL;
 }
 
-// Fonction pour obtenir la longueur d'une ligne (sans le \n)
 static int get_line_length(const char* line_start) {
     int len = 0;
     while (line_start[len] != '\0' && line_start[len] != '\n') {
@@ -143,7 +287,6 @@ static int get_line_length(const char* line_start) {
     return len;
 }
 
-// Convertit une position absolue en (ligne, colonne)
 static void pos_to_line_col(const char* content, int pos, int* out_line, int* out_col) {
     int line = 0;
     int col = 0;
@@ -162,14 +305,13 @@ static void pos_to_line_col(const char* content, int pos, int* out_line, int* ou
 }
 
 void draw_editor_window(const char* filename, const char* content, int cursor_pos, int scroll_offset) {
-    int width = 76;   // 80 - 4 pour les marges
-    int height = 21;  // 25 - 4 pour titre et aide
+    int width = 76;
+    int height = 21;
     int start_x = 2;
     int start_y = 1;
     int content_height = height - 4;
     int content_width = width - 4;
     
-    // Dessiner la bordure
     for (int y = start_y; y <= start_y + height; y++) {
         for (int x = start_x; x <= start_x + width; x++) {
             if (y == start_y || y == start_y + height ||
@@ -183,14 +325,11 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
         }
     }
 
-    // Titre
     set_cursor(start_y, start_x + 2);
     print_string("edition : ");
     print_string(filename);
 
     int content_y = start_y + 2;
-    
-    // Afficher le contenu ligne par ligne avec défilement
     int total_lines = count_lines(content);
     
     for (int screen_line = 0; screen_line < content_height; screen_line++) {
@@ -203,7 +342,6 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
             if (line_start) {
                 int line_len = get_line_length(line_start);
                 
-                // Afficher jusqu'à content_width caractères
                 for (int i = 0; i < content_width; i++) {
                     if (i < line_len) {
                         print_char(line_start[i]);
@@ -212,31 +350,25 @@ void draw_editor_window(const char* filename, const char* content, int cursor_po
                     }
                 }
             } else {
-                // Ligne vide
                 for (int i = 0; i < content_width; i++) {
                     print_char(' ');
                 }
             }
         } else {
-            // Pas de contenu sur cette ligne
             for (int i = 0; i < content_width; i++) {
                 print_char(' ');
             }
         }
     }
 
-    // Barre d'aide en bas
     set_cursor(start_y + height - 2, start_x + 2);
     print_string("Fleches:Deplacer ECHAP:Sauver Ctrl+C:Annuler");
 
-    // Positionner le curseur
     int cursor_line, cursor_col;
     pos_to_line_col(content, cursor_pos, &cursor_line, &cursor_col);
     
-    // Ajuster pour le défilement
     int screen_line = cursor_line - scroll_offset;
     
-    // S'assurer que le curseur est visible
     if (screen_line >= 0 && screen_line < content_height) {
         if (cursor_col >= content_width) {
             cursor_col = content_width - 1;
@@ -254,7 +386,6 @@ void windowed_write(const char* filename) {
     int content_height = height - 4;
     int scroll_offset = 0;
 
-    // Charger le fichier existant
     uint8_t existing_data[1024];
     int bytes_read = fs_read_file(filename, existing_data, sizeof(existing_data) - 1);
     if (bytes_read > 0) {
@@ -266,11 +397,9 @@ void windowed_write(const char* filename) {
     clear_screen();
     
     while (1) {
-        // Calculer la position du curseur en ligne/colonne
         int cursor_line, cursor_col;
         pos_to_line_col(content, cursor_pos, &cursor_line, &cursor_col);
         
-        // Ajuster le défilement pour garder le curseur visible
         if (cursor_line < scroll_offset) {
             scroll_offset = cursor_line;
         }
@@ -282,7 +411,7 @@ void windowed_write(const char* filename) {
 
         char c = keyboard_get_char();
 
-        if (c == 27) {  // ESC - Sauvegarder
+        if (c == 27) {
             fs_write_file(filename, (uint8_t*)content, strlen(content));
             clear_screen();
             print_string("Fichier sauvegarde : ");
@@ -290,64 +419,56 @@ void windowed_write(const char* filename) {
             print_string("\n");
             break;
         }
-        else if (c == 3) {  // Ctrl+C - Annuler
+        else if (c == 3) {
             clear_screen();
             print_string("edition annulee\n");
             break;
         }
-        else if (c == 1) {  // Flèche haut
-            // Remonter d'une ligne
+        else if (c == 1) {
             int cursor_line, cursor_col;
             pos_to_line_col(content, cursor_pos, &cursor_line, &cursor_col);
             
             if (cursor_line > 0) {
-                // Trouver le début de la ligne précédente
                 const char* prev_line = get_line_start(content, cursor_line - 1);
                 if (prev_line) {
                     int prev_line_len = get_line_length(prev_line);
-                    // Positionner au même offset dans la ligne précédente (ou à la fin)
                     int target_col = cursor_col < prev_line_len ? cursor_col : prev_line_len;
                     cursor_pos = (prev_line - content) + target_col;
                 }
             }
         }
-        else if (c == 2) {  // Flèche bas
-            // Descendre d'une ligne
+        else if (c == 2) {
             int cursor_line, cursor_col;
             pos_to_line_col(content, cursor_pos, &cursor_line, &cursor_col);
             
             int total_lines = count_lines(content);
             if (cursor_line < total_lines - 1) {
-                // Trouver le début de la ligne suivante
                 const char* next_line = get_line_start(content, cursor_line + 1);
                 if (next_line) {
                     int next_line_len = get_line_length(next_line);
-                    // Positionner au même offset dans la ligne suivante (ou à la fin)
                     int target_col = cursor_col < next_line_len ? cursor_col : next_line_len;
                     cursor_pos = (next_line - content) + target_col;
                 }
             }
         }
-        else if (c == 17) {  // Flèche gauche
+        else if (c == 17) {
             if (cursor_pos > 0) {
                 cursor_pos--;
             }
         }
-        else if (c == 18) {  // Flèche droite
+        else if (c == 18) {
             if (cursor_pos < (int)strlen(content)) {
                 cursor_pos++;
             }
         }
-        else if ((c == '\b' || c == 127) && cursor_pos > 0) {  // Backspace ou Delete
-            // Supprimer le caractère avant le curseur
+        else if ((c == '\b' || c == 127) && cursor_pos > 0) {
             for (int i = cursor_pos - 1; i < (int)strlen(content); i++) {
                 content[i] = content[i + 1];
             }
             cursor_pos--;
         }
-        else if (c == '\r' || c == '\n') {  // Entrée - Nouvelle ligne
+        else if (c == '\r' || c == '\n') {
             if (cursor_pos < (int)sizeof(content) - 2) {
-                // Insérer un retour à la ligne
                 int len = strlen(content);
                 for (int i = len; i >= cursor_pos; i--) {
                     content[i + 1] = content[i];
@@ -356,9 +477,8 @@ void windowed_write(const char* filename) {
                 cursor_pos++;
             }
         }
-        else if (c >= 32 && c < 127) {  // Caractère imprimable
+        else if (c >= 32 && c < 127) {
             if (cursor_pos < (int)sizeof(content) - 2) {
-                // Insérer le caractère
                 int len = strlen(content);
                 for (int i = len; i >= cursor_pos; i--) {
                     content[i + 1] = content[i];
@@ -375,7 +495,6 @@ void windowed_write(const char* filename) {
 void tetra_shell(void) {
     char input[256];
     
-    // Afficher le contenu du README.txt s'il existe (premier démarrage)
     uint8_t readme_buffer[2048];
     int readme_result = fs_read_file("README.txt", readme_buffer, sizeof(readme_buffer) - 1);
     if (readme_result > 0) {
@@ -392,13 +511,14 @@ void tetra_shell(void) {
         print_string("     |__/ \\_______/   \\___/  |__/      \\_______/ \\______/  \\______/  \n");
         print_string("\n");
         print_string("========================================\n");
-        print_string("       TetraOS Shell v1.3 (Fr)      \n");
+        print_string("       TetraOS Shell v1.4 (Fr)      \n");
         print_string("========================================\n");
         print_string("Tapez 'help' pour la liste des commandes\n\n");
     }
 
-    while (1) {
-        print_string("root@TetraOS:");
+    while (g_session_manager.logged_in) {
+        print_string(session_get_current_name());
+        print_string("@TetraOS:");
 
         extern FSTable g_fs;
         extern uint32_t g_cwd;
@@ -419,7 +539,11 @@ void tetra_shell(void) {
             if (i > 0) print_char('/');
         }
 
-        print_string("# ");
+        if (session_is_admin()) {
+            print_string("# ");
+        } else {
+            print_string("$ ");
+        }
 
         int i = 0;
         while (1) {
@@ -450,7 +574,27 @@ void tetra_shell(void) {
         const char* s = input;
         while (*s == ' ') s++;
 
-        if (strcmp(s, "help") == 0) {
+        // ====== COMMANDES DE SESSION ======
+        if (strcmp(s, "adduser") == 0) {
+            cmd_adduser();
+        }
+        else if (strcmp(s, "deluser") == 0) {
+            cmd_deluser();
+        }
+        else if (strcmp(s, "users") == 0) {
+            cmd_users();
+        }
+        else if (strcmp(s, "whoami") == 0) {
+            cmd_whoami();
+        }
+        else if (strcmp(s, "logout") == 0) {
+            print_string("Deconnexion...\n");
+            session_logout();
+            return;
+        }
+        
+        // ====== COMMANDES SYSTEME ======
+        else if (strcmp(s, "help") == 0) {
             print_string("Commandes disponibles :\n");
             print_string("  ls              - Lister les fichiers et dossiers\n");
             print_string("  tree            - Afficher l'arborescence\n");
@@ -458,70 +602,85 @@ void tetra_shell(void) {
             print_string("  pwd             - Afficher le dossier courant\n");
             print_string("  mkdir <nom>     - Creer un dossier\n");
             print_string("  touch <nom>     - Creer un fichier vide\n");
-            print_string("  edit <fichier>  - editer un fichier (cree si necessaire)\n");
-            print_string("  cat <fichier>   - Afficher le contenu d'un fichier\n");
+            print_string("  edit <fichier>  - editer un fichier\n");
+            print_string("  cat <fichier>   - Afficher le contenu\n");
             print_string("  rm <nom>        - Supprimer un fichier/dossier\n");
             print_string("  tex <fichier>   - Executer un fichier .tex\n");
             print_string("  clear           - Effacer l'ecran\n");
-            print_string("  info            - Afficher les informations du systeme de fichiers\n");
-            print_string("  sl              - Animation amusante\n");
-            print_string("  shutdown        - eteindre le systeme\n");
+            print_string("  info            - Informations du systeme de fichiers\n");
+            print_string("  sl              - Animation\n");
+            print_string("  shutdown        - Eteindre le systeme\n");
+            print_string("\nGestion des sessions :\n");
+            print_string("  whoami          - Session actuelle\n");
+            print_string("  users           - Lister les sessions\n");
+            print_string("  adduser         - Creer une session (admin)\n");
+            print_string("  deluser         - Supprimer une session (admin)\n");
+            print_string("  logout          - Se deconnecter\n");
         }
         else if (strcmp(s, "log") == 0) {
-            print_string("--[ Journal de log de TetraOS v1.3 ]---\n");
+            print_string("--[ Journal de log de TetraOS v1.4 ]---\n");
             print_string(" \n");
+            print_string("V1.4 :\n");
+            print_string(" -Ajout du systeme de sessions multi-utilisateurs\n");
+            print_string(" -Gestion des permissions par session\n");
+            print_string(" -Menu de selection au demarrage\n");
+            print_string(" -Roles admin/utilisateur\n");
+            print_string("\n");
             print_string("V1.3 :\n");
-            print_string(" -Ajout du system tex (TetraExecutable) qui permet maintenant d'avoire des executables en .tex interne a l'OS ... rien que ca.\n");
-            print_string(" Voir la docu dans l'OS pour plus d'info sur son fonctionnement.\n");
+            print_string(" -Ajout du system tex (TetraExecutable)\n");
             print_string("V1.2 :\n");
-            print_string(" -Traduction de la plupart de l'OS en francais\n");
-            print_string("\n");
+            print_string(" -Traduction en francais\n");
             print_string("V1.1 :\n");
-            print_string(" -Ajout des fonctions suivantes dans RAY64 FS :\n");
-            print_string("   -tree\n");
-            print_string("   -cd\n");
-            print_string("   -pwd\n");
-            print_string("   -mkdir\n");
-            print_string("   -rm\n");
-            print_string("\n");
-            print_string("V1.0\n");
-            print_string(" -Ajout du system de fichier RAY64 :\n");
-            print_string("   -touch\n");
-            print_string("   -edit\n");
-            print_string("   -cat\n");
-            print_string("   -rm\n");
-            print_string("   -info\n");
-            print_string(" -Ajout du TetraShell : \n");
-            print_string(" -Stabilisation du system d'affichage VGA\n");
+            print_string(" -Ajout de tree, cd, pwd, mkdir, rm\n");
+            print_string("V1.0 :\n");
+            print_string(" -Ajout du system RAY64 FS\n");
         }
-else if (strcmp(s, "shutdown") == 0) {
-    clear_screen();
-    print_string(" /$$$$$$$$          /$$                         /$$$$$$   /$$$$$$  \n");
-    print_string("|__  $$__/         | $$                        /$$__  $$ /$$__  $$ \n");
-    print_string("   | $$  /$$$$$$  /$$$$$$    /$$$$$$  /$$$$$$ | $$  \\ $$| $$  \\__/ \n");
-    print_string("   | $$ /$$__  $$|_  $$_/   /$$__  $$|____  $$| $$  | $$|  $$$$$$  \n");
-    print_string("   | $$| $$$$$$$$  | $$    | $$  \\__/ /$$$$$$$| $$  | $$ \\____  $$ \n");
-    print_string("   | $$| $$_____/  | $$ /$$| $$      /$$__  $$| $$  | $$ /$$  \\ $$ \n");
-    print_string("   | $$|  $$$$$$$  |  $$$$/| $$     |  $$$$$$$|  $$$$$$/|  $$$$$$/ \n");
-    print_string("   |__/ \\_______/   \\___/  |__/      \\_______/ \\______/  \\______/  \n");
-    print_string("\n");
-    print_string("Extinction du systeme en cours...\n");
-
-    delay_spin(120000000);
-    outw(0x604, 0x2000);
-}
-
-        else if (strcmp(s, "clear") == 0) {
+        else if (strcmp(s, "shutdown") == 0) {
+            if (!session_has_permission(PERM_SYSTEM_SHUTDOWN)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             clear_screen();
+            print_string(" /$$$$$$$$          /$$                         /$$$$$$   /$$$$$$  \n");
+            print_string("|__  $$__/         | $$                        /$$__  $$ /$$__  $$ \n");
+            print_string("   | $$  /$$$$$$  /$$$$$$    /$$$$$$  /$$$$$$ | $$  \\ $$| $$  \\__/ \n");
+            print_string("   | $$ /$$__  $$|_  $$_/   /$$__  $$|____  $$| $$  | $$|  $$$$$$  \n");
+            print_string("   | $$| $$$$$$$$  | $$    | $$  \\__/ /$$$$$$$| $$  | $$ \\____  $$ \n");
+            print_string("   | $$| $$_____/  | $$ /$$| $$      /$$__  $$| $$  | $$ /$$  \\ $$ \n");
+            print_string("   | $$|  $$$$$$$  |  $$$$/| $$     |  $$$$$$$|  $$$$$$/|  $$$$$$/ \n");
+            print_string("   |__/ \\_______/   \\___/  |__/      \\_______/ \\______/  \\______/  \n");
+            print_string("\n");
+            print_string("Extinction du systeme en cours...\n");
+            delay_spin(120000000);
+            outw(0x604, 0x2000);
+        }
+        else if (strcmp(s, "clear") == 0) {
+            if (session_has_permission(PERM_CLEAR_SCREEN)) {
+                clear_screen();
+            } else {
+                print_string("Permission refusee\n");
+            }
         }
         else if (strcmp(s, "ls") == 0) {
-            fs_ls();
+            if (session_has_permission(PERM_LIST_FILES)) {
+                fs_ls();
+            } else {
+                print_string("Permission refusee\n");
+            }
         }
         else if (strcmp(s, "tree") == 0) {
-            fs_tree();
+            if (session_has_permission(PERM_LIST_FILES)) {
+                fs_tree();
+            } else {
+                print_string("Permission refusee\n");
+            }
         }
         else if (strcmp(s, "info") == 0) {
-            fs_list();
+            if (session_has_permission(PERM_LIST_FILES)) {
+                fs_list();
+            } else {
+                print_string("Permission refusee\n");
+            }
         }
         else if (strcmp(s, "pwd") == 0) {
             fs_pwd();
@@ -536,6 +695,10 @@ else if (strcmp(s, "shutdown") == 0) {
             }
         }
         else if (strncmp(s, "mkdir ", 6) == 0) {
+            if (!session_has_permission(PERM_FS_WRITE)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             char *name = (char*)(s + 6);
             while (*name == ' ') name++;
             if (fs_mkdir(name) >= 0) {
@@ -543,10 +706,14 @@ else if (strcmp(s, "shutdown") == 0) {
                 print_string(name);
                 print_string("\n");
             } else {
-                print_string("mkdir : echec (existe dejà ou systeme de fichiers plein)\n");
+                print_string("mkdir : echec\n");
             }
         }
         else if (strncmp(s, "touch ", 6) == 0) {
+            if (!session_has_permission(PERM_FS_WRITE)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             char *name = (char*)(s + 6);
             while (*name == ' ') name++;
             if (fs_add(name) >= 0) {
@@ -554,10 +721,14 @@ else if (strcmp(s, "shutdown") == 0) {
                 print_string(name);
                 print_string("\n");
             } else {
-                print_string("touch : echec (existe dejà ou systeme de fichiers plein)\n");
+                print_string("touch : echec\n");
             }
         }
         else if (strncmp(s, "edit ", 5) == 0) {
+            if (!session_has_permission(PERM_FS_WRITE)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             char *name = (char*)(s + 5);
             while (*name == ' ') name++;
 
@@ -567,7 +738,7 @@ else if (strcmp(s, "shutdown") == 0) {
                 print_string(name);
                 print_string("\n");
                 if (fs_add(name) < 0) {
-                    print_string("edit : echec lors de la creation du fichier\n");
+                    print_string("edit : echec\n");
                     continue;
                 }
             }
@@ -575,6 +746,10 @@ else if (strcmp(s, "shutdown") == 0) {
             windowed_write(name);
         }
         else if (strncmp(s, "cat ", 4) == 0) {
+            if (!session_has_permission(PERM_FS_READ)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             char *name = (char*)(s + 4);
             while (*name == ' ') name++;
 
@@ -589,12 +764,16 @@ else if (strcmp(s, "shutdown") == 0) {
             } else if (result == 0) {
                 print_string("(fichier vide)\n");
             } else {
-                print_string("cat : impossible de lire le fichier : ");
+                print_string("cat : impossible de lire : ");
                 print_string(name);
                 print_string("\n");
             }
         }
         else if (strncmp(s, "rm ", 3) == 0) {
+            if (!session_has_permission(PERM_FS_DELETE)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             char *name = (char*)(s + 3);
             while (*name == ' ') name++;
 
@@ -612,6 +791,10 @@ else if (strcmp(s, "shutdown") == 0) {
             cmd_sl();
         }
         else if (strncmp(s, "tex ", 4) == 0) {
+            if (!session_has_permission(PERM_TEX_EXECUTE)) {
+                print_string("Permission refusee\n");
+                continue;
+            }
             char *name = (char*)(s + 4);
             while (*name == ' ') name++;
             

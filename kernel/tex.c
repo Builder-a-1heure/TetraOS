@@ -176,22 +176,61 @@ TexVar* tex_get_var(TexContext* ctx, const char* name) {
 float tex_eval_expr(TexContext* ctx, const char* expr) {
     expr = skip_spaces(expr);
     
-    if ((*expr >= '0' && *expr <= '9') || *expr == '-') {
-        return (float)tex_atoi(expr);
-    }
+    // Parser l'opérande gauche
+    float left_val = 0.0f;
     
-    if (is_varname_char(*expr)) {
+    if ((*expr >= '0' && *expr <= '9') || *expr == '-') {
+        left_val = (float)tex_atoi(expr);
+        // Avancer jusqu'au prochain opérateur ou fin
+        while (*expr && (*expr == '-' || (*expr >= '0' && *expr <= '9'))) expr++;
+    } else if (is_varname_char(*expr)) {
         char varname[TEX_VAR_NAME_LEN];
         copy_varname(&expr, varname, TEX_VAR_NAME_LEN);
         
         TexVar* var = tex_get_var(ctx, varname);
         if (var) {
-            if (var->type == VAR_TYPE_INT) return (float)var->int_value;
-            if (var->type == VAR_TYPE_FLOAT) return var->float_value;
+            if (var->type == VAR_TYPE_INT) left_val = (float)var->int_value;
+            if (var->type == VAR_TYPE_FLOAT) left_val = var->float_value;
         }
     }
     
-    return 0.0f;
+    // Chercher un opérateur
+    expr = skip_spaces(expr);
+    if (*expr == '\0' || *expr == ')' || *expr == '{') {
+        return left_val;
+    }
+    
+    char op = *expr;
+    if (op != '+' && op != '-' && op != '*' && op != '/') {
+        return left_val;
+    }
+    expr++;
+    
+    // Parser l'opérande droit
+    expr = skip_spaces(expr);
+    float right_val = 0.0f;
+    
+    if ((*expr >= '0' && *expr <= '9') || *expr == '-') {
+        right_val = (float)tex_atoi(expr);
+    } else if (is_varname_char(*expr)) {
+        char varname[TEX_VAR_NAME_LEN];
+        copy_varname(&expr, varname, TEX_VAR_NAME_LEN);
+        
+        TexVar* var = tex_get_var(ctx, varname);
+        if (var) {
+            if (var->type == VAR_TYPE_INT) right_val = (float)var->int_value;
+            if (var->type == VAR_TYPE_FLOAT) right_val = var->float_value;
+        }
+    }
+    
+    // Effectuer l'opération
+    switch (op) {
+        case '+': return left_val + right_val;
+        case '-': return left_val - right_val;
+        case '*': return left_val * right_val;
+        case '/': return (right_val != 0.0f) ? (left_val / right_val) : 0.0f;
+        default: return left_val;
+    }
 }
 
 void tex_eval_string(TexContext* ctx, const char* expr, char* out, int max_len) {
@@ -575,7 +614,7 @@ int tex_execute_line(TexContext* ctx, const char* line) {
     
     // if <condition> {
     if (strncmp(line, "if ", 3) == 0 || strncmp(line, "if(", 3) == 0) {
-        line += 2;
+        line += 3;  // Corriger: avancer de 3 caractères pour "if " ou "if("
         line = skip_spaces(line);
         
         int condition_met = tex_eval_condition(ctx, line);
@@ -601,6 +640,58 @@ int tex_execute_line(TexContext* ctx, const char* line) {
         return 0;
     }
     
+    // Assignation simple: varname = expression
+    // (doit être vérifié en dernier pour éviter les faux positifs)
+    const char* equals_pos = line;
+    while (*equals_pos && *equals_pos != '=' && *equals_pos != '(' && *equals_pos != '.') {
+        equals_pos++;
+    }
+    
+    if (*equals_pos == '=' && *(equals_pos + 1) != '=') {
+        // C'est une assignation simple
+        char varname[TEX_VAR_NAME_LEN];
+        int i = 0;
+        const char* ptr = line;
+        
+        // Extraire le nom de la variable
+        while (is_varname_char(*ptr) && i < TEX_VAR_NAME_LEN - 1) {
+            varname[i++] = *ptr++;
+        }
+        varname[i] = '\0';
+        
+        // Vérifier que la variable existe déjà
+        TexVar* existing = tex_get_var(ctx, varname);
+        if (existing == NULL) {
+            print_string("TEX Erreur: Variable '");
+            print_string(varname);
+            print_string("' non declaree\n");
+            return -1;
+        }
+        
+        if (existing->is_const) {
+            print_string("TEX Erreur: Impossible de modifier la constante '");
+            print_string(varname);
+            print_string("'\n");
+            return -1;
+        }
+        
+        // Sauter jusqu'au signe =
+        while (*ptr && *ptr != '=') ptr++;
+        if (*ptr == '=') ptr++;
+        ptr = skip_spaces(ptr);
+        
+        // Évaluer l'expression à droite du =
+        if (*ptr == '"') {
+            char value[TEX_VAR_VALUE_LEN];
+            tex_eval_string(ctx, ptr, value, TEX_VAR_VALUE_LEN);
+            tex_set_var(ctx, varname, VAR_TYPE_STRING, value, 0);
+        } else {
+            int value = (int)tex_eval_expr(ctx, ptr);
+            tex_set_var(ctx, varname, VAR_TYPE_INT, &value, 0);
+        }
+        
+        return 0;
+    }
     return 0;
 }
 
