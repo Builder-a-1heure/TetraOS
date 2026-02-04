@@ -1,4 +1,4 @@
-// session.c - Implémentation du système de sessions
+// session.c - Implémentation du système de sessions (VERSION CORRIGÉE - BUG FS)
 #include "session.h"
 #include "screen.h"
 #include "input.h"
@@ -40,6 +40,9 @@ void session_load(void) {
         int num_sessions = bytes / sizeof(Session);
         if (num_sessions > MAX_SESSIONS) num_sessions = MAX_SESSIONS;
         
+        // Réinitialiser le compteur
+        g_session_manager.session_count = 0;
+        
         for (int i = 0; i < num_sessions; i++) {
             Session* src = (Session*)&buffer[i * sizeof(Session)];
             if (src->is_active) {
@@ -47,9 +50,19 @@ void session_load(void) {
                 g_session_manager.session_count++;
             }
         }
+        
+        print_string("Sessions chargees: ");
+        char count_str[4];
+        count_str[0] = '0' + g_session_manager.session_count;
+        count_str[1] = '\0';
+        print_string(count_str);
+        print_string("\n");
+    } else {
+        print_string("Aucune session sauvegardee trouvee\n");
     }
 }
 
+// CORRECTION BUG CRITIQUE : Création du fichier sessions.dat s'il n'existe pas
 void session_save(void) {
     uint8_t buffer[sizeof(Session) * MAX_SESSIONS];
     memset(buffer, 0, sizeof(buffer));
@@ -63,7 +76,25 @@ void session_save(void) {
         }
     }
     
-    fs_write_file(SESSION_FILE, buffer, sizeof(buffer));
+    // CORRECTION : Vérifier si le fichier existe, sinon le créer
+    int file_idx = fs_find(SESSION_FILE);
+    if (file_idx < 0) {
+        // Le fichier n'existe pas, le créer
+        print_string("Creation du fichier sessions.dat...\n");
+        file_idx = fs_add(SESSION_FILE);
+        if (file_idx < 0) {
+            print_string("ERREUR: Impossible de creer sessions.dat\n");
+            return;
+        }
+    }
+    
+    // Écrire les données
+    int result = fs_write_file(SESSION_FILE, buffer, sizeof(buffer));
+    if (result < 0) {
+        print_string("ERREUR: Impossible d'ecrire sessions.dat\n");
+    } else {
+        print_string("Sessions sauvegardees avec succes\n");
+    }
 }
 
 // ============================================================================
@@ -73,6 +104,7 @@ void session_save(void) {
 int session_create(const char* name, const char* password, uint8_t is_admin) {
     // Vérifier qu'on n'a pas atteint le maximum
     if (g_session_manager.session_count >= MAX_SESSIONS) {
+        print_string("ERREUR: Nombre maximum de sessions atteint\n");
         return -1;
     }
     
@@ -80,6 +112,7 @@ int session_create(const char* name, const char* password, uint8_t is_admin) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (g_session_manager.sessions[i].is_active &&
             strcmp(g_session_manager.sessions[i].name, name) == 0) {
+            print_string("ERREUR: Session existe deja\n");
             return -1; // Session existe déjà
         }
     }
@@ -108,7 +141,10 @@ int session_create(const char* name, const char* password, uint8_t is_admin) {
             }
             
             g_session_manager.session_count++;
+            
+            print_string("Session creee, sauvegarde en cours...\n");
             session_save();
+            
             return i;
         }
     }
@@ -149,6 +185,13 @@ void session_list(void) {
     if (count == 0) {
         print_string("  Aucune session\n");
     }
+    
+    print_string("Total: ");
+    char count_str[4];
+    count_str[0] = '0' + count;
+    count_str[1] = '\0';
+    print_string(count_str);
+    print_string(" session(s)\n");
 }
 
 // ============================================================================
@@ -180,7 +223,8 @@ int session_login_menu(void) {
         print_string("       TetraOS - Selection Session      \n");
         print_string("========================================\n\n");
         
-        print_string("Utilisez <- et -> pour naviguer\n");
+        print_string("Utilisez les fleches <- et -> pour naviguer\n");
+        print_string("Ou utilisez 'h' (gauche) et 'l' (droite)\n");
         print_string("Appuyez sur Entree pour selectionner\n\n");
         
         // Afficher les sessions avec indicateur de sélection
@@ -205,14 +249,26 @@ int session_login_menu(void) {
         // Attendre une entrée clavier
         char c = keyboard_get_char();
         
-        // Flèche gauche (codes peuvent varier)
-        if (c == 'h' || c == 'H' || c == 75) { // h ou flèche gauche
+        // Flèche gauche : code 17 (ou 'h'/'H')
+        if (c == 17 || c == 'h' || c == 'H') {
             if (selected > 0) {
                 selected--;
             }
         }
-        // Flèche droite
-        else if (c == 'l' || c == 'L' || c == 77) { // l ou flèche droite
+        // Flèche droite : code 18 (ou 'l'/'L')
+        else if (c == 18 || c == 'l' || c == 'L') {
+            if (selected < active_count - 1) {
+                selected++;
+            }
+        }
+        // Flèche haut : code 16
+        else if (c == 16) {
+            if (selected > 0) {
+                selected--;
+            }
+        }
+        // Flèche bas : code 14
+        else if (c == 14) {
             if (selected < active_count - 1) {
                 selected++;
             }
@@ -220,6 +276,10 @@ int session_login_menu(void) {
         // Entrée
         else if (c == '\n' || c == '\r') {
             return active_sessions[selected];
+        }
+        // ESC pour quitter
+        else if (c == 27) {
+            return -1;
         }
     }
 }
@@ -256,10 +316,17 @@ void session_logout(void) {
 // ============================================================================
 
 int session_has_permission(Permission perm) {
+    // Si aucune session n'existe encore, autoriser tout (premier démarrage)
+    if (g_session_manager.session_count == 0) {
+        return 1;
+    }
+    
+    // Si personne n'est connecté mais des sessions existent, refuser
     if (!g_session_manager.logged_in || !g_session_manager.current_session) {
         return 0;
     }
     
+    // Vérifier les permissions de la session
     return (g_session_manager.current_session->permissions & (1 << perm)) != 0;
 }
 
@@ -333,4 +400,165 @@ int session_is_admin(void) {
         return g_session_manager.current_session->is_admin;
     }
     return 0;
+}
+
+// ============================================================================
+// FONCTION DE LOGIN COMPLÈTE - AUTONOME
+// ============================================================================
+
+// Fonction utilitaire locale pour lire une ligne SANS vérification de permissions
+static void read_line_raw(char* buffer, int max_len, int hide_password) {
+    int idx = 0;
+    extern char keyboard_get_char(void);
+    extern void print_char(char c);
+    extern void print_string(const char* str);
+    
+    while (1) {
+        char c = keyboard_get_char();
+        
+        if (c == '\n' || c == '\r') {
+            buffer[idx] = '\0';
+            print_char('\n');
+            break;
+        }
+        else if ((c == '\b' || c == 127) && idx > 0) {
+            idx--;
+            print_string("\b \b");
+        }
+        else if (c >= 32 && c <= 126 && idx < max_len - 1) {
+            buffer[idx++] = c;
+            if (hide_password) {
+                print_char('*');
+            } else {
+                print_char(c);
+            }
+        }
+    }
+}
+
+int session_do_login_flow(void) {
+    extern void clear_screen(void);
+    extern void print_string(const char* str);
+    extern char keyboard_get_char(void);
+    
+    // Vérifier s'il y a des sessions
+    int has_sessions = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (g_session_manager.sessions[i].is_active) {
+            has_sessions = 1;
+            break;
+        }
+    }
+    
+    // Si aucune session n'existe, créer un admin
+    if (!has_sessions) {
+        clear_screen();
+        print_string("========================================\n");
+        print_string("    PREMIER DEMARRAGE - TetraOS        \n");
+        print_string("========================================\n\n");
+        print_string("Aucune session trouvee.\n");
+        print_string("Creation d'une session administrateur...\n\n");
+        
+        char admin_name[SESSION_NAME_LEN];
+        char admin_password[SESSION_PASSWORD_LEN];
+        
+        print_string("Nom de l'administrateur: ");
+        read_line_raw(admin_name, SESSION_NAME_LEN, 0);
+        
+        print_string("Mot de passe: ");
+        read_line_raw(admin_password, SESSION_PASSWORD_LEN, 1);
+        
+        print_string("\n--- DEBUG: Creation de la session ---\n");
+        print_string("Nom: ");
+        print_string(admin_name);
+        print_string("\n");
+        
+        // Créer la session admin
+        int result = session_create(admin_name, admin_password, 1);
+        
+        if (result < 0) {
+            print_string("\nERREUR CRITIQUE: Impossible de creer la session!\n");
+            print_string("Verifiez le systeme de fichiers.\n");
+            print_string("Appuyez sur une touche...\n");
+            keyboard_get_char();
+            return -1;
+        }
+        
+        // Se connecter automatiquement
+        g_session_manager.current_session = &g_session_manager.sessions[result];
+        g_session_manager.current_session_index = result;
+        g_session_manager.logged_in = 1;
+        
+        print_string("\nSession admin creee avec succes!\n");
+        print_string("Index: ");
+        char idx_str[4];
+        idx_str[0] = '0' + result;
+        idx_str[1] = '\0';
+        print_string(idx_str);
+        print_string("\n");
+        print_string("Connexion automatique...\n");
+        print_string("Appuyez sur une touche pour continuer...\n");
+        keyboard_get_char();
+        
+        return 0;
+    }
+    
+    // Boucle de tentatives
+    int max_attempts = 3;
+    
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        // Menu de sélection
+        int selected_session = session_login_menu();
+        
+        if (selected_session < 0) {
+            print_string("Annulation du login ou aucune session disponible\n");
+            return -1;
+        }
+        
+        // Écran de login
+        clear_screen();
+        print_string("========================================\n");
+        print_string("          TetraOS - Connexion           \n");
+        print_string("========================================\n\n");
+        
+        print_string("Session: ");
+        print_string(g_session_manager.sessions[selected_session].name);
+        print_string("\n\n");
+        
+        char password[SESSION_PASSWORD_LEN];
+        print_string("Mot de passe: ");
+        read_line_raw(password, SESSION_PASSWORD_LEN, 1);
+        
+        // Tentative de connexion
+        if (session_login(selected_session, password) == 0) {
+            print_string("\nConnexion reussie!\n");
+            print_string("Bienvenue ");
+            print_string(session_get_current_name());
+            print_string("!\n\n");
+            print_string("Appuyez sur une touche pour continuer...\n");
+            keyboard_get_char();
+            return 0;
+        } else {
+            print_string("\nMot de passe incorrect!\n");
+            
+            if (attempt < max_attempts - 1) {
+                print_string("Tentatives restantes: ");
+                char num[2];
+                num[0] = '0' + (max_attempts - attempt - 1);
+                num[1] = '\0';
+                print_string(num);
+                print_string("\n");
+                print_string("Appuyez sur une touche pour reessayer...\n");
+                keyboard_get_char();
+            }
+        }
+    }
+    
+    // Toutes les tentatives échouées
+    print_string("\nNombre maximum de tentatives atteint.\n");
+    print_string("Le systeme va redemarrer.\n");
+    print_string("Appuyez sur une touche...\n");
+    keyboard_get_char();
+    
+    return -1;
 }

@@ -26,7 +26,7 @@ start:
     mov es, ax
     xor bx, bx               ; offset 0x0000
     mov ah, 0x02             ; Lire secteur(s)
-    mov al, 80               ; Nombre de secteurs à lire (ajuster si besoin)
+    mov al, 100               ; Nombre de secteurs à lire (ajuster si besoin)
     mov ch, 0                ; Cylindre 0
     mov cl, 2                ; Secteur 2 (secteur 1 = bootloader)
     mov dh, 0                ; Tête 0

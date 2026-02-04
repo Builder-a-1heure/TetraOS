@@ -49,81 +49,21 @@ void kmain(void) {
     session_init();
     session_load();
     
-    // Vérifier s'il y a des sessions
-    int has_sessions = 0;
-    for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (g_session_manager.sessions[i].is_active) {
-            has_sessions = 1;
-            break;
-        }
-    }
-    
-    // Si aucune session n'existe, créer une session admin par défaut
-    if (!has_sessions) {
-        clear_screen();
-        print_string("========================================\n");
-        print_string("    PREMIER DEMARRAGE - TetraOS        \n");
-        print_string("========================================\n\n");
-        print_string("Aucune session trouvee.\n");
-        print_string("Creation d'une session administrateur...\n\n");
-        
-        char admin_name[SESSION_NAME_LEN];
-        char admin_password[SESSION_PASSWORD_LEN];
-        
-        print_string("Nom de l'administrateur: ");
-        read_line(admin_name, SESSION_NAME_LEN);
-        
-        print_string("Mot de passe: ");
-        read_line(admin_password, SESSION_PASSWORD_LEN);
-        
-        session_create(admin_name, admin_password, 1);
-        
-        print_string("\nSession admin creee avec succes!\n");
-        print_string("Appuyez sur une touche pour continuer...\n");
-        keyboard_get_char();
-    }
-    
     // Boucle principale : login -> shell -> logout -> login
+    // Le login est géré ENTIÈREMENT par session.c
     while (1) {
-        // Afficher le menu de sélection de session
-        int selected_session = session_login_menu();
-        
-        if (selected_session < 0) {
-            print_string("Erreur: Aucune session disponible\n");
+        // Processus de login complet (autonome, aucune vérification de permissions)
+        if (session_do_login_flow() != 0) {
+            print_string("Erreur fatale lors du login\n");
             while(1) { asm volatile ("nop"); }
         }
         
-        clear_screen();
-        print_string("========================================\n");
-        print_string("          TetraOS - Connexion           \n");
-        print_string("========================================\n\n");
+        // À ce stade, l'utilisateur est connecté
+        // Lancer le shell avec vérifications de permissions
+        tetra_shell();
         
-        print_string("Session: ");
-        print_string(g_session_manager.sessions[selected_session].name);
-        print_string("\n\n");
-        
-        char password[SESSION_PASSWORD_LEN];
-        print_string("Mot de passe: ");
-        read_line(password, SESSION_PASSWORD_LEN);
-        
-        if (session_login(selected_session, password) == 0) {
-            print_string("\nConnexion reussie!\n");
-            print_string("Bienvenue ");
-            print_string(session_get_current_name());
-            print_string("!\n\n");
-            print_string("Appuyez sur une touche pour continuer...\n");
-            keyboard_get_char();
-            
-            // Lancer le shell
-            tetra_shell();
-            
-            // Si on arrive ici, c'est qu'il y a eu un logout
-            print_string("\nDeconnexion...\n");
-        } else {
-            print_string("\nMot de passe incorrect!\n");
-            print_string("Appuyez sur une touche pour reessayer...\n");
-            keyboard_get_char();
-        }
+        // Si on arrive ici, c'est qu'il y a eu un logout
+        print_string("\nDeconnexion...\n");
     }
 
     print_string("ETAPE 6 : Retour du shell (anormal)\n");

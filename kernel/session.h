@@ -93,6 +93,13 @@ void session_set_permission(int session_index, Permission perm, int value);
 // Donne toutes les permissions à une session (admin)
 void session_grant_all_permissions(int session_index);
 
+// === Fonction de login complète ===
+
+// Gère TOUT le processus de login de A à Z (menu, saisie, vérification)
+// Cette fonction est AUTONOME et NE vérifie PAS les permissions
+// Retourne 0 si login réussi, -1 si erreur
+int session_do_login_flow(void);
+
 // === Fonctions utilitaires ===
 
 // Hash simple d'un mot de passe
