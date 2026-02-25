@@ -9,26 +9,33 @@ MEMORY {
 SECTIONS {
     . = 0x00010000;
 
-    /* Section start ABSOLUMENT en premier */
+    .magic : {
+        LONG(0xDEADBEEF)    /* signature cherchée par stage2 */
+    } >ram
+
     .text.start : {
-        *(.text.start)      /* start() ici */
+        *(.text.start)
     } >ram
 
-    /* Le reste du code */
     .text : {
-        *(.text)            /* Tout le code SAUF start() */
+        *(.text)
     } >ram
 
-    /* Données read-only */
     .rodata : {
         *(.rodata*)
     } >ram
 
     .data : { *(.data) } >ram
-    .bss : { *(.bss) } >ram
+
+    .bss : {
+        _bss_start = .;
+        *(.bss)
+        *(COMMON)
+        _bss_end = .;
+    } >ram
 
     _kernel_start = ADDR(.text.start);
-    _kernel_end = .;
+    _kernel_end = _bss_end;
 
     /DISCARD/ : {
         *(.comment) *(.note) *(.eh_frame)

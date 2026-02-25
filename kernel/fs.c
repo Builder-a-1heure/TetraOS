@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "screen.h"
 #include "ata.h"
+#include "session.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "tex_doc_content.h"
@@ -20,6 +21,162 @@ static uint8_t fs_temp_buffer[FS_TABLE_SECTORS * 512];
 // Forward declarations
 static int ray64_create_node(const char* name, uint8_t is_dir);
 int fs_write_file(const char* name, const uint8_t* data, uint32_t size);
+// Helpers statiques utilisés par le moteur ACL (définis plus bas)
+static void ray64_get_meta(FSNode* node, RAY64NodeMeta* meta);
+static void ray64_set_meta(FSNode* node, const RAY64NodeMeta* meta);
+static int  ray64_flush_node(uint32_t node_idx);
+
+// ============================================================================
+// MOTEUR ACL RAY64
+// ============================================================================
+
+// Vérifie si la session courante peut effectuer op sur node_idx
+// Logique :
+//   1. Admin bypass tout (sauf si acl_lock ET op != admin bits)
+//   2. Owner → vérifier bits owner
+//   3. Autres → vérifier bits other (bloqué par défaut sur les homes)
+int fs_acl_check(uint32_t node_idx, AclOp op) {
+    if (node_idx >= g_fs.node_count) return 0;
+    FSNode* node = &g_fs.nodes[node_idx];
+    if (node->magic != FS_MAGIC) return 0;
+
+    RAY64NodeMeta meta;
+    ray64_get_meta(node, &meta);
+    uint16_t perms = meta.permissions;
+    uint16_t uid   = meta.uid;
+
+    // Session courante
+    int is_admin  = session_is_admin();
+    uint16_t cur_uid = session_get_uid();
+
+    // Si aucune session n'existe encore (premier boot), tout est permis
+    if (g_session_manager.session_count == 0) return 1;
+    // Si nœud système pas encore tagué (uid SYSTEM), admin ou owner = tous
+    if (uid == UID_SYSTEM || uid == UID_NOOWNER) {
+        return is_admin ? 1 : 0; // Seul admin accède aux nœuds système
+    }
+
+    // Bit masks selon l'opération
+    uint16_t owner_bit = (op == ACL_READ)  ? ACL_OWNER_R :
+                         (op == ACL_WRITE) ? ACL_OWNER_W : ACL_OWNER_X;
+    uint16_t admin_bit = (op == ACL_READ)  ? ACL_ADMIN_R :
+                         (op == ACL_WRITE) ? ACL_ADMIN_W : ACL_ADMIN_X;
+    uint16_t other_bit = (op == ACL_READ)  ? ACL_OTHER_R :
+                         (op == ACL_WRITE) ? ACL_OTHER_W : ACL_OTHER_X;
+
+    // Admin → vérifie les bits admin
+    if (is_admin) {
+        return (perms & admin_bit) ? 1 : 0;
+    }
+
+    // Propriétaire → vérifie bits owner
+    if (cur_uid == uid) {
+        return (perms & owner_bit) ? 1 : 0;
+    }
+
+    // Autre → vérifie bits other
+    return (perms & other_bit) ? 1 : 0;
+}
+
+// Définit les permissions et l'uid d'un nœud (usage interne)
+void fs_acl_set_node(uint32_t node_idx, uint16_t perms, uint16_t uid) {
+    if (node_idx >= g_fs.node_count) return;
+    FSNode* node = &g_fs.nodes[node_idx];
+    RAY64NodeMeta meta;
+    ray64_get_meta(node, &meta);
+    meta.permissions = perms;
+    meta.uid = uid;
+    ray64_set_meta(node, &meta);
+    ray64_flush_node(node_idx);
+}
+
+// Affiche les permissions d'un nœud de façon lisible
+void fs_acl_print(uint32_t node_idx) {
+    if (node_idx >= g_fs.node_count) return;
+    FSNode* node = &g_fs.nodes[node_idx];
+    RAY64NodeMeta meta;
+    ray64_get_meta(node, &meta);
+    uint16_t p = meta.permissions;
+
+    // Affiche rwxrwxrwx
+    print_char((p & ACL_OWNER_R) ? 'r' : '-');
+    print_char((p & ACL_OWNER_W) ? 'w' : '-');
+    print_char((p & ACL_OWNER_X) ? 'x' : '-');
+    print_char((p & ACL_ADMIN_R) ? 'r' : '-');
+    print_char((p & ACL_ADMIN_W) ? 'w' : '-');
+    print_char((p & ACL_ADMIN_X) ? 'x' : '-');
+    print_char((p & ACL_OTHER_R) ? 'r' : '-');
+    print_char((p & ACL_OTHER_W) ? 'w' : '-');
+    print_char((p & ACL_OTHER_X) ? 'x' : '-');
+
+    // Propriétaire
+    print_string("  owner:");
+    const char* owner_name = session_get_name_by_uid(meta.uid);
+    print_string(owner_name ? owner_name : "system");
+
+    if (meta.acl_lock) print_string("  [LOCK]");
+    if (node->is_dir)  print_string("  [DIR]");
+}
+
+// chmod : change les permissions d'un nœud dans le cwd courant
+int fs_chmod(const char* name, uint16_t new_perms) {
+    int idx = fs_find_in_dir(g_cwd, name);
+    if (idx < 0) {
+        print_string("ray64.chmod : introuvable : ");
+        print_string(name);
+        print_string("\n");
+        return -1;
+    }
+
+    FSNode* node = &g_fs.nodes[idx];
+    RAY64NodeMeta meta;
+    ray64_get_meta(node, &meta);
+
+    int is_admin  = session_is_admin();
+    uint16_t cur_uid = session_get_uid();
+
+    // Seul le propriétaire OU un admin peut chmod
+    // Si acl_lock → seul admin
+    if (meta.acl_lock && !is_admin) {
+        print_string("ray64.chmod : permissions verrouillee (admin requis)\n");
+        return -1;
+    }
+    if (!is_admin && cur_uid != meta.uid) {
+        print_string("ray64.chmod : acces refuse (non proprietaire)\n");
+        return -1;
+    }
+
+    meta.permissions = new_perms & 0x1FF; // 9 bits max
+    ray64_set_meta(node, &meta);
+    ray64_flush_node((uint32_t)idx);
+    return 0;
+}
+
+// chown : change le propriétaire d'un nœud (admin seulement)
+int fs_chown(const char* name, uint16_t new_uid) {
+    if (!session_is_admin()) {
+        print_string("ray64.chown : admin requis\n");
+        return -1;
+    }
+
+    int idx = fs_find_in_dir(g_cwd, name);
+    if (idx < 0) {
+        print_string("ray64.chown : introuvable : ");
+        print_string(name);
+        print_string("\n");
+        return -1;
+    }
+
+    FSNode* node = &g_fs.nodes[idx];
+    RAY64NodeMeta meta;
+    ray64_get_meta(node, &meta);
+    meta.uid = new_uid;
+    ray64_set_meta(node, &meta);
+    ray64_flush_node((uint32_t)idx);
+    return 0;
+}
+
+// ============================================================================
 
 // Utility: get current timestamp (placeholder - would use RTC in real system)
 static uint64_t ray64_get_timestamp(void) {
@@ -367,6 +524,14 @@ int fs_read_file(const char* name, uint8_t* out, uint32_t max_len) {
         print_string("RAY64: File not found\n");
         return -1;
     }
+
+    // ACL : vérifier le droit de lecture sur le nœud
+    if (!fs_acl_check((uint32_t)idx, ACL_READ)) {
+        print_string("RAY64: Acces refuse (lecture) sur '");
+        print_string(name);
+        print_string("'\n");
+        return -1;
+    }
     
     FSNode* file = &g_fs.nodes[idx];
     if (file->is_dir) {
@@ -423,6 +588,14 @@ int fs_write_file(const char* name, const uint8_t* data, uint32_t size) {
     int idx = fs_find_in_dir(g_cwd, name);
     if (idx < 0) {
         print_string("RAY64: File not found\n");
+        return -1;
+    }
+
+    // ACL : vérifier le droit d'écriture
+    if (!fs_acl_check((uint32_t)idx, ACL_WRITE)) {
+        print_string("RAY64: Acces refuse (ecriture) sur '");
+        print_string(name);
+        print_string("'\n");
         return -1;
     }
     
@@ -512,8 +685,22 @@ static int ray64_create_node(const char* name, uint8_t is_dir) {
     meta.create_time = ray64_get_timestamp();
     meta.modify_time = meta.create_time;
     meta.access_time = meta.create_time;
-    meta.permissions = is_dir ? 0755 : 0644;
-    meta.link_count = is_dir ? 2 : 1;
+    meta.link_count  = is_dir ? 2 : 1;
+    meta.acl_lock    = 0;
+
+    // Propriétaire = session courante
+    meta.uid = session_get_uid();
+
+    // Permissions par défaut selon le contexte :
+    //   - Répertoire home /home/<n>    → ACL_HOME_DIR (0770) posé par session.c via fs_acl_set_node
+    //   - Tout autre nœud créé par un user normal → owner RWX, admin RWX, others ---  (0770)
+    //   - Si le UID est système (pas encore loggué) → seulement admin accède (0070)
+    if (meta.uid == UID_SYSTEM) {
+        meta.permissions = ACL_ADMIN_FULL; // 0070 - nœuds système
+    } else {
+        meta.permissions = ACL_OWNER_FULL | ACL_ADMIN_FULL; // 0770 - fichiers/dossiers utilisateur
+    }
+
     ray64_set_meta(new_node, &meta);
     
     // Write initial file header if file
@@ -552,23 +739,64 @@ static int ray64_create_node(const char* name, uint8_t is_dir) {
 }
 
 int fs_mkdir(const char* name) {
+    // ACL : droit d'écriture sur le dossier courant
+    if (!fs_acl_check(g_cwd, ACL_WRITE)) {
+        print_string("RAY64: Acces refuse (creation de dossier ici)\n");
+        return -1;
+    }
     return ray64_create_node(name, 1);
 }
 
+// Create a directory inside a specific parent without changing g_cwd
+int fs_mkdir_in_dir(uint32_t parent_idx, const char* name) {
+    if (parent_idx >= g_fs.node_count) return -1;
+    if (!g_fs.nodes[parent_idx].is_dir) return -1;
+
+    // Check name doesn't already exist in parent
+    if (fs_find_in_dir(parent_idx, name) >= 0) {
+        // Directory already exists — return its index
+        return fs_find_in_dir(parent_idx, name);
+    }
+
+    if (g_fs.node_count >= FS_MAX_NODES) return -1;
+
+    uint32_t saved_cwd = g_cwd;
+    g_cwd = parent_idx;
+    int idx = ray64_create_node(name, 1);
+    g_cwd = saved_cwd;
+    return idx;
+}
+
 int fs_add(const char* name) {
+    // ACL : droit d'écriture sur le dossier courant pour y créer un fichier
+    if (!fs_acl_check(g_cwd, ACL_WRITE)) {
+        print_string("RAY64: Acces refuse (creation dans ce dossier)\n");
+        return -1;
+    }
     return ray64_create_node(name, 0);
 }
 
 // Change directory
 int fs_cd(const char* name) {
     if (strcmp(name, "/") == 0) {
+        // ACL : vérifier qu'on peut entrer dans la racine
+        if (!fs_acl_check(0, ACL_EXEC)) {
+            print_string("RAY64: Acces refuse a la racine\n");
+            return -1;
+        }
         g_cwd = 0;
         return 0;
     }
     
     if (strcmp(name, "..") == 0) {
         if (g_cwd == 0) return 0;
-        g_cwd = g_fs.nodes[g_cwd].parent;
+        uint32_t parent = g_fs.nodes[g_cwd].parent;
+        // ACL : vérifier qu'on peut entrer dans le parent
+        if (!fs_acl_check(parent, ACL_EXEC)) {
+            print_string("RAY64: Acces refuse au dossier parent\n");
+            return -1;
+        }
+        g_cwd = parent;
         return 0;
     }
     
@@ -576,6 +804,14 @@ int fs_cd(const char* name) {
     if (idx < 0) return -1;
     
     if (!g_fs.nodes[idx].is_dir) return -1;
+
+    // ACL : vérifier le droit d'exécution (= entrer dans le dossier)
+    if (!fs_acl_check((uint32_t)idx, ACL_EXEC)) {
+        print_string("RAY64: Acces refuse au dossier '");
+        print_string(name);
+        print_string("'\n");
+        return -1;
+    }
     
     g_cwd = (uint32_t)idx;
     return 0;
@@ -606,14 +842,20 @@ void fs_pwd(void) {
 
 // List directory
 void fs_ls(void) {
+    // ACL : droit de lecture sur le dossier courant
+    if (!fs_acl_check(g_cwd, ACL_READ)) {
+        print_string("RAY64: Acces refuse (lecture du dossier)\n");
+        return;
+    }
+
     FSNode* cwd = &g_fs.nodes[g_cwd];
     if (cwd->child_count == 0) {
         print_string("Directory empty\n");
         return;
     }
     
-    print_string("Name                       Type   Perms  Size\n");
-    print_string("-------------------------- ------ ------ ----------\n");
+    print_string("Name                       Type   Perms     Owner      Size\n");
+    print_string("-------------------------- ------ --------- ---------- ----------\n");
     
     for (uint32_t i = 0; i < cwd->child_count; i++) {
         uint32_t child_idx = cwd->children[i];
@@ -622,25 +864,64 @@ void fs_ls(void) {
         FSNode* child = &g_fs.nodes[child_idx];
         RAY64NodeMeta meta;
         ray64_get_meta(child, &meta);
+
+        // Si pas le droit de lire cette entrée, l'afficher masquée
+        int can_read = fs_acl_check(child_idx, ACL_READ);
         
         // Name (padded to 26 chars)
-        print_string(child->name);
-        int name_len = strlen(child->name);
-        for (int p = 0; p < (26 - name_len); p++) print_string(" ");
+        if (!can_read) {
+            // Afficher le nom censuré mais signaler la présence
+            print_string("???                        ");
+        } else {
+            print_string(child->name);
+            int name_len = strlen(child->name);
+            for (int p = 0; p < (26 - name_len); p++) print_string(" ");
+        }
         
         // Type
         print_string(child->is_dir ? "[DIR] " : "[FILE]");
         print_string(" ");
         
-        // Permissions (display as decimal for safety)
-        print_dec(meta.permissions);
-        print_string("  ");
+        // Permissions (format rwxrwxrwx)
+        if (can_read) {
+            uint16_t p = meta.permissions;
+            print_char((p & ACL_OWNER_R) ? 'r' : '-');
+            print_char((p & ACL_OWNER_W) ? 'w' : '-');
+            print_char((p & ACL_OWNER_X) ? 'x' : '-');
+            print_char((p & ACL_ADMIN_R) ? 'r' : '-');
+            print_char((p & ACL_ADMIN_W) ? 'w' : '-');
+            print_char((p & ACL_ADMIN_X) ? 'x' : '-');
+            print_char((p & ACL_OTHER_R) ? 'r' : '-');
+            print_char((p & ACL_OTHER_W) ? 'w' : '-');
+            print_char((p & ACL_OTHER_X) ? 'x' : '-');
+        } else {
+            print_string("---------");
+        }
+        print_string(" ");
+
+        // Owner
+        if (can_read) {
+            const char* oname = session_get_name_by_uid(meta.uid);
+            int olen = 0;
+            if (oname) {
+                print_string(oname);
+                olen = strlen(oname);
+            } else {
+                print_string("system");
+                olen = 6;
+            }
+            for (int p = 0; p < (10 - olen); p++) print_string(" ");
+        } else {
+            print_string("???        ");
+        }
         
         // Size
         if (child->is_dir) {
             print_string("         -");
-        } else {
+        } else if (can_read) {
             print_dec(child->size_bytes);
+        } else {
+            print_string("         ?");
         }
         print_string("\n");
     }
@@ -651,6 +932,14 @@ int fs_delete(const char* name) {
     int idx = fs_find_in_dir(g_cwd, name);
     if (idx < 0) {
         print_string("RAY64: Not found\n");
+        return -1;
+    }
+
+    // ACL : vérifier le droit d'écriture (delete = write sur le nœud)
+    if (!fs_acl_check((uint32_t)idx, ACL_WRITE)) {
+        print_string("RAY64: Acces refuse (suppression) sur '");
+        print_string(name);
+        print_string("'\n");
         return -1;
     }
     

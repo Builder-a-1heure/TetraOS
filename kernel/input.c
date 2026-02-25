@@ -1,6 +1,8 @@
 #include "screen.h"
 #include "fs.h"
 #include "input.h"
+#include "mouse.h"
+#include <stdint.h>
 
 char input_buffer[512];
 int input_index = 0;
@@ -209,88 +211,67 @@ char get_input_char() {
 char keyboard_get_char() {
     // Réinitialiser ctrl_pressed au début pour éviter qu'il reste bloqué
     static int last_ctrl_scancode = 0;
-    
+
     while (1) {
-        unsigned char scancode = keyboard_read_scancode();
-        
+        // --- Polling souris (non-bloquant) ---
+        // On lit le status byte : bit 0 = donnée dispo, bit 5 = vient de la souris
+        unsigned char st;
+        __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
+
+        if (st & 1) {
+            if (st & (1 << 5)) {
+                // Donnée souris → laisser mouse_poll la consommer
+                if (mouse_poll()) {
+                    mouse_erase_cursor();
+                    mouse_draw_cursor();
+                }
+                continue; // Pas de scancode clavier ici
+            }
+        } else {
+            // Rien à lire du tout → petit yield et on recommence
+            __asm__ __volatile__("nop");
+            continue;
+        }
+
+        // --- Donnée clavier (bit5 = 0, bit0 = 1) ---
+        unsigned char scancode;
+        __asm__ __volatile__("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
+
         // Gestion des modificateurs Shift
-        if (scancode == 0x2A || scancode == 0x36) { 
-            shift_pressed = 1; 
-            continue; 
-        }
-        if (scancode == 0xAA || scancode == 0xB6) { 
-            shift_pressed = 0; 
-            continue; 
-        }
-        
+        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; continue; }
+        if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; continue; }
+
         // CORRECTION : Gestion améliorée de Ctrl
-        if (scancode == 0x1D) { 
-            ctrl_pressed = 1; 
-            last_ctrl_scancode = scancode;
-            continue; 
-        }
-        if (scancode == 0x9D) { 
-            ctrl_pressed = 0; 
-            last_ctrl_scancode = 0;
-            continue; 
-        }
-        
+        if (scancode == 0x1D) { ctrl_pressed = 1; last_ctrl_scancode = scancode; continue; }
+        if (scancode == 0x9D) { ctrl_pressed = 0; last_ctrl_scancode = 0; continue; }
+
         // Ignorer les key-up events
         if (scancode & 0x80) {
-            // Si on relâche une touche et que ctrl était pressé mais qu'on n'a pas vu le release
-            // de ctrl, le réinitialiser après un certain temps
             if (ctrl_pressed && last_ctrl_scancode != 0) {
-                // Timeout simple : après quelques releases, on suppose que ctrl a été relâché
                 static int release_count = 0;
                 release_count++;
-                if (release_count > 5) {
-                    ctrl_pressed = 0;
-                    last_ctrl_scancode = 0;
-                    release_count = 0;
-                }
+                if (release_count > 5) { ctrl_pressed = 0; last_ctrl_scancode = 0; release_count = 0; }
             }
             continue;
         }
-        
-        // Gestion des touches spéciales
-        if (scancode == 0x01) return 27;  // ESC
+
+        // Touches spéciales
+        if (scancode == 0x01) return 27;   // ESC
         if (scancode == 0x0E) return '\b'; // Backspace
-        
-        // CORRECTION BUG #2 : Codes de flèches cohérents
-        // Utiliser des codes ASCII étendus non utilisés pour les flèches
-        if (scancode == 0x48) return 16;  // Flèche haut (Ctrl+P)
-        if (scancode == 0x50) return 14;  // Flèche bas (Ctrl+N)
-        if (scancode == 0x4B) return 17;  // Flèche gauche
-        if (scancode == 0x4D) return 18;  // Flèche droite
-        
+        if (scancode == 0x48) return 16;   // Flèche haut
+        if (scancode == 0x50) return 14;   // Flèche bas
+        if (scancode == 0x4B) return 17;   // Flèche gauche
+        if (scancode == 0x4D) return 18;   // Flèche droite
+
         // Touches normales
         if (scancode < (sizeof(keyboard_map)/sizeof(keyboard_map[0]))) {
             char c = shift_pressed ? keyboard_map_shift[scancode] : keyboard_map[scancode];
-            
-            // Gestion de Ctrl+C
-            if (ctrl_pressed && (c == 'c' || c == 'C')) {
-                ctrl_pressed = 0; // Réinitialiser ctrl après usage
-                return 3;
-            }
-            
-            // Gestion de Ctrl+S (save)
-            if (ctrl_pressed && (c == 's' || c == 'S')) {
-                ctrl_pressed = 0;
-                return 19;
-            }
-            
-            // Gestion de Ctrl+Q (quit)
-            if (ctrl_pressed && (c == 'q' || c == 'Q')) {
-                ctrl_pressed = 0;
-                return 17;
-            }
-            
-            // CORRECTION : Retourner le caractère même si ctrl est pressé
-            // (pour permettre des combinaisons futures)
-            if (c) {
-                // Réinitialiser le compteur de release si on a une vraie touche
-                return c;
-            }
+
+            if (ctrl_pressed && (c == 'c' || c == 'C')) { ctrl_pressed = 0; return 3; }
+            if (ctrl_pressed && (c == 's' || c == 'S')) { ctrl_pressed = 0; return 19; }
+            if (ctrl_pressed && (c == 'q' || c == 'Q')) { ctrl_pressed = 0; return 17; }
+
+            if (c) return c;
         }
     }
 }

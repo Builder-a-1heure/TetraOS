@@ -25,6 +25,58 @@ typedef struct __FileHeader__ FileHeader;
 #define RAY64_VERSION        1
 #define RAY64_META_SIZE      32  // Space for extended metadata in reserved
 
+// ============================================================
+// ACL - Système de contrôle d'accès RAY64
+// ============================================================
+//
+// Les permissions sont stockées dans un uint16_t sur 9 bits :
+//
+//   bits 8-6 : droits OWNER  (propriétaire du nœud)
+//   bits 5-3 : droits ADMIN  (sessions is_admin == 1)
+//   bits 2-0 : droits OTHER  (toutes les autres sessions)
+//
+//   Chaque triplet : bit2=READ  bit1=WRITE  bit0=EXEC(cd pour dirs)
+//
+// Exemples :
+//   0b111_111_000 = 0770  → owner+admin RWX, autres rien
+//   0b111_101_000 = 0750  → owner RWX, admin RX, autres rien
+//   0b111_000_000 = 0700  → owner seul
+//   0b111_111_111 = 0777  → tout le monde (rare)
+//
+// UID = index de la session propriétaire dans g_session_manager.sessions[]
+// UID = 0xFFFF → propriétaire = système (nœuds créés avant les sessions)
+// ============================================================
+
+// Masques de bits ACL
+#define ACL_OWNER_R   (1 << 8)   // 0400
+#define ACL_OWNER_W   (1 << 7)   // 0200
+#define ACL_OWNER_X   (1 << 6)   // 0100
+#define ACL_ADMIN_R   (1 << 5)   // 0040
+#define ACL_ADMIN_W   (1 << 4)   // 0020
+#define ACL_ADMIN_X   (1 << 3)   // 0010
+#define ACL_OTHER_R   (1 << 2)   // 0004
+#define ACL_OTHER_W   (1 << 1)   // 0002
+#define ACL_OTHER_X   (1 << 0)   // 0001
+
+// Valeurs prédéfinies utiles
+#define ACL_OWNER_FULL    (ACL_OWNER_R | ACL_OWNER_W | ACL_OWNER_X)  // 0700
+#define ACL_ADMIN_FULL    (ACL_ADMIN_R | ACL_ADMIN_W | ACL_ADMIN_X)  // 0070
+#define ACL_ADMIN_RX      (ACL_ADMIN_R |               ACL_ADMIN_X)  // 0050
+#define ACL_HOME_DIR      (ACL_OWNER_FULL | ACL_ADMIN_FULL)          // 0770 home user
+#define ACL_ROOT_DIR      (ACL_OWNER_FULL | ACL_ADMIN_FULL)          // 0770 /home root
+#define ACL_PUBLIC_R      (ACL_OWNER_FULL | ACL_ADMIN_FULL | ACL_OTHER_R) // 0774
+
+// Opérations ACL à vérifier
+typedef enum {
+    ACL_READ  = 0,  // Lire un fichier / entrer dans un dossier (ls)
+    ACL_WRITE = 1,  // Écrire / créer / modifier
+    ACL_EXEC  = 2,  // cd dans un dossier / exécuter un .tex
+} AclOp;
+
+// UID spécial pour les nœuds système
+#define UID_SYSTEM  0xFFFF
+#define UID_NOOWNER 0xFFFE
+
 // --- File Header (stored at beginning of each file on disk) ---
 typedef struct __attribute__((packed)) __FileHeader__ {
     uint32_t magic;           // FILE_MAGIC
@@ -34,14 +86,16 @@ typedef struct __attribute__((packed)) __FileHeader__ {
 } FileHeader;
 
 // --- RAY64 Extended Metadata (stored in FSNode reserved space) ---
+// Taille totale : 32 bytes exactement (= RAY64_META_SIZE)
 typedef struct __attribute__((packed)) {
-    uint64_t create_time;     // Creation timestamp
-    uint64_t modify_time;     // Last modification timestamp
-    uint64_t access_time;     // Last access timestamp
-    uint16_t permissions;     // Unix-like permissions (e.g., 0755)
-    uint16_t uid;             // Owner user ID
-    uint16_t gid;             // Owner group ID
-    uint16_t link_count;      // Number of hard links
+    uint64_t create_time;    // 8 : timestamp création
+    uint64_t modify_time;    // 8 : timestamp modification
+    uint64_t access_time;    // 8 : timestamp dernier accès
+    uint16_t permissions;    // 2 : ACL 9 bits (owner|admin|other) rwxrwxrwx
+    uint16_t uid;            // 2 : index session propriétaire (UID_SYSTEM = nœud système)
+    uint16_t link_count;     // 2 : nombre de liens
+    uint8_t  acl_lock;       // 1 : 1 = seul un admin peut modifier les permissions
+    uint8_t  _pad;           // 1 : alignement
 } RAY64NodeMeta;
 
 // --- Filesystem Node (packed for disk layout compatibility) ---
@@ -88,6 +142,10 @@ void fs_format(void);
 // Create a new directory
 int fs_mkdir(const char* name);
 
+// Create a directory inside a specific parent directory (does not depend on g_cwd)
+// Returns the new node index or -1 on error
+int fs_mkdir_in_dir(uint32_t parent_idx, const char* name);
+
 // Change current working directory
 int fs_cd(const char* name);
 
@@ -127,5 +185,29 @@ uint32_t fs_next_free_lba(void);
 
 // List all filesystem nodes (debug function)
 void fs_list(void);
+
+// --- ACL Functions ---
+
+// Vérifie si la session courante a le droit d'effectuer op sur le nœud node_idx
+// Retourne 1 si autorisé, 0 si refusé
+// bypass_admin : si 1, un admin passe toujours (comportement normal)
+int fs_acl_check(uint32_t node_idx, AclOp op);
+
+// Change les permissions d'un nœud (chmod)
+// new_perms : valeur 9 bits (ex: ACL_HOME_DIR = 0770)
+// Retourne 0 si succès, -1 si refus ou erreur
+int fs_chmod(const char* name, uint16_t new_perms);
+
+// Change le propriétaire d'un nœud (chown)
+// new_uid : index de session (ou UID_SYSTEM)
+// Seul un admin peut changer le propriétaire
+int fs_chown(const char* name, uint16_t new_uid);
+
+// Affiche les permissions ACL d'un nœud sous forme lisible
+// Sortie : "rwxrwx--- owner:alice [lock]"
+void fs_acl_print(uint32_t node_idx);
+
+// Définit les permissions d'un nœud par son index (usage interne + session.c)
+void fs_acl_set_node(uint32_t node_idx, uint16_t perms, uint16_t uid);
 
 #endif // FS_H

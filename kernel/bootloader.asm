@@ -1,3 +1,14 @@
+; =============================================================
+; BOOTLOADER TetraOS - Stage 1
+; Secteur 1 du disque (512 bytes, signature 0xAA55)
+;
+; Rôle UNIQUE : charger stage2.asm (secteur 2) en 0x7E00
+;               puis lui passer la main
+;
+; Stage 2 s'occupe de tout le reste (chargement kernel, GDT,
+; passage en mode protégé).
+; =============================================================
+
 [BITS 16]
 [ORG 0x7C00]
 
@@ -9,91 +20,67 @@ start:
     mov ss, ax
     mov sp, 0x7C00
 
-    ; Affiche un message d'amorçage
+
+    ; Sauvegarder le numéro de lecteur (dl = 0x80 pour HDD)
+    mov [boot_drive], dl
+
+    ; Message de boot
     mov si, boot_msg
-.print_char:
+.print:
     lodsb
-    or al, al
-    jz .after_msg
+    or  al, al
+    jz  .after_msg
     mov ah, 0x0E
     int 0x10
-    jmp .print_char
+    jmp .print
 .after_msg:
 
-
-    ; Charger le kernel à 0x100000 → segment:offset = 0x1000:0x0000
-    mov ax, 0x1000
+    ; =========================================================
+    ; Charger stage 2 : 1 secteur, LBA 1 (= secteur 2 du disque)
+    ; On utilise INT 13h AH=02h (CHS) ici car stage 2 est
+    ; toujours au secteur 2 — on garde CHS pour la compatibilité
+    ; maximale avec les vieux BIOS.
+    ; Destination : 0x0000:0x7E00 (juste après le bootloader)
+    ; =========================================================
+    mov ax, 0x0000
     mov es, ax
-    xor bx, bx               ; offset 0x0000
-    mov ah, 0x02             ; Lire secteur(s)
-    mov al, 100               ; Nombre de secteurs à lire (ajuster si besoin)
-    mov ch, 0                ; Cylindre 0
-    mov cl, 2                ; Secteur 2 (secteur 1 = bootloader)
-    mov dh, 0                ; Tête 0
-    mov dl, 0x80             ; Disque dur principal
+    mov bx, 0x7E00          ; offset destination
+
+    mov ah, 0x02            ; Lire secteurs (CHS)
+    mov al, 2               ; 2 secteurs (stage2 = 1024 bytes)
+    mov ch, 0               ; Cylindre 0
+    mov cl, 2               ; Secteur 2 (CHS commence à 1)
+    mov dh, 0               ; Tête 0
+    mov dl, [boot_drive]    ; Numéro de lecteur sauvegardé
     int 0x13
-    jc disk_error
+    jc  disk_error
 
-    ; Passer en mode protégé
-    cli
-    lgdt [gdt_descriptor]
+    ; Passer la main à stage 2
+    ; On remet dl = boot_drive pour que stage2 l'ait dans dl
+    mov dl, [boot_drive]
+    jmp 0x0000:0x7E00
 
-    mov eax, cr0
-    or eax, 1
-    mov cr0, eax
-
-    jmp CODE_SEG:init_pm    ; Saut far pour vider le pipeline
-
-
-; ---------------- GDT ----------------
-
-gdt_start:
-    dq 0x0000000000000000          ; Descripteur nul
-    dq 0x00CF9A000000FFFF          ; Code segment 32-bit, base=0, limite=4GiB
-    dq 0x00CF92000000FFFF          ; Data segment 32-bit, base=0, limite=4GiB
-gdt_end:
-
-gdt_descriptor:
-    dw gdt_end - gdt_start - 1
-    dd gdt_start
-
-CODE_SEG equ 0x08
-DATA_SEG equ 0x10
-
-; ----------- Mode protégé -----------
-[BITS 32]
-init_pm:
-    mov ax, DATA_SEG
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-    mov esp, 0x90000               ; Pile dans la RAM
-
-    ; Sauter à l'adresse exacte du kernel
-    jmp CODE_SEG:0x00010000              ; Le kernel commence à 0x1000
-
-; ------------- Gestion des erreurs -------------
 disk_error:
-    mov si, disk_msg
-.print_err:
+    mov si, err_msg
+.printerr:
     lodsb
-    or al, al
-    jz halt
+    or  al, al
+    jz  .halt
     mov ah, 0x0E
     int 0x10
-    jmp .print_err
-
-halt:
+    jmp .printerr
+.halt:
     cli
     hlt
-    jmp halt
+    jmp .halt
 
-; --------- Messages et signature -----------
+; =========================================================
+; Données
+; =========================================================
+boot_drive  db 0x80
+boot_msg    db "TetraOS booting...", 13, 10, 0
+err_msg     db "ERREUR: impossible de charger stage2", 13, 10, 0
 
-boot_msg db "Chargement du kernel...", 0
-disk_msg db "Erreur de lecture disque", 0
-
+; Remplissage + signature MBR
 times 510 - ($ - $$) db 0
 dw 0xAA55

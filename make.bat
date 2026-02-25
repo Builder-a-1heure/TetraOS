@@ -1,6 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
+
 REM === CONFIGURATION ===
 set GCC="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-gcc"
 set LD="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-ld"
@@ -16,15 +17,19 @@ del /q *.bin >nul 2>&1
 del /q *.elf >nul 2>&1
 del /q os.img >nul 2>&1
 
-REM === BOOTLOADER ===
-echo Assemblage du bootloader (MBR)...
+REM === BOOTLOADER (Stage 1) ===
+echo Assemblage du bootloader (MBR Stage 1)...
 %NASM% -f bin kernel\bootloader.asm -o bootloader.bin
+if errorlevel 1 goto error
+
+REM === STAGE 2 (Chargeur LBA + init VESA, 2 secteurs) ===
+echo Assemblage du stage2 (chargeur LBA)...
+%NASM% -f bin kernel\stage2.asm -o stage2.bin
 if errorlevel 1 goto error
 
 REM === COMPILATION DU KERNEL ===
 echo Compilation des fichiers du kernel...
-set FILES=main input fs screen utils ata boot_info mem_boot tex session
-
+set FILES=main input fs screen vesa utils ata boot_info mem_boot tex session vesaanim mouse desktop
 for %%f in (%FILES%) do (
     echo Compilation de kernel\%%f.c...
     %GCC% -ffreestanding -Wall -Wextra -nostdlib -Ikernel -c kernel\%%f.c -o kernel\%%f.o -g
@@ -48,12 +53,16 @@ kernel\main.o ^
 kernel\input.o ^
 kernel\fs.o ^
 kernel\screen.o ^
+kernel\vesa.o ^
 kernel\utils.o ^
 kernel\ata.o ^
 kernel\boot_info.o ^
 kernel\mem_boot.o ^
 kernel\tex.o ^
 kernel\session.o ^
+kernel\vesaanim.o ^
+kernel\mouse.o ^
+kernel\desktop.o ^
 kernel\src\mem\pfa.o
 
 
@@ -66,14 +75,16 @@ REM === CREATION DU DISQUE RAW ===
 echo Création de os.img vide de 16 Mo...
 fsutil file createnew os.img 16777216 >nul
 
-REM === ECRITURE DU BOOTLOADER ===
+REM === ECRITURE DANS L'IMAGE ===
+REM Layout : LBA 0=bootloader | LBA 1-2=stage2 (2 sect) | LBA 3+=kernel
 echo Copie du bootloader dans os.img secteur 0...
 python write_lba.py os.img bootloader.bin 0
 if errorlevel 1 goto error
-
-REM === ECRITURE DU KERNEL A PARTIR DU SECTEUR 1 ===
-echo Insertion du kernel.bin à partir du secteur 1 (offset 512)...
-python write_lba.py os.img kernel.bin 1 40
+echo Copie du stage2 dans os.img secteurs 1-2...
+python write_lba.py os.img stage2.bin 1
+if errorlevel 1 goto error
+echo Insertion du kernel.bin à partir du secteur 3...
+python write_lba.py os.img kernel.bin 3
 if errorlevel 1 goto error
 
 REM === DEMARRAGE QEMU ===
@@ -81,8 +92,9 @@ echo Lancement de QEMU...
 %QEMU% ^
     -drive format=raw,file=os.img ^
     -m 64M ^
-    -serial stdio ^
     -display sdl ^
+    -vga std ^
+    -global VGA.vgamem_mb=32 ^
     -d guest_errors
 goto end
 

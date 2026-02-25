@@ -22,6 +22,8 @@ typedef enum {
     PERM_SYSTEM_SHUTDOWN,  // Éteindre le système
     PERM_CLEAR_SCREEN,     // Effacer l'écran
     PERM_LIST_FILES,       // Lister les fichiers
+    PERM_CONFIG_READ,      // Lire les fichiers de config de session
+    PERM_CONFIG_WRITE,     // Écrire / modifier les fichiers de config de session
 } Permission;
 
 // Structure d'une session utilisateur
@@ -31,6 +33,7 @@ typedef struct {
     uint8_t is_active;                     // 1 si la session existe
     uint8_t is_admin;                      // 1 si admin
     uint32_t permissions;                  // Bitmap des permissions
+    uint32_t home_dir_node;                // Index FSNode du répertoire home de la session
 } Session;
 
 // Contexte de session actuelle
@@ -100,6 +103,19 @@ void session_grant_all_permissions(int session_index);
 // Retourne 0 si login réussi, -1 si erreur
 int session_do_login_flow(void);
 
+// === Fonctions de gestion du répertoire home ===
+
+// Crée le répertoire home d'une session dans /home/<nom>
+// Retourne l'index FSNode du répertoire créé, -1 si erreur
+int session_create_home_dir(int session_index);
+
+// Place le cwd sur le répertoire home de la session connectée
+void session_set_cwd_to_home(void);
+
+// Accès admin : depuis root, liste le contenu de /home/<session_name>
+// Réservé aux sessions admin
+void session_admin_browse_home(const char* session_name);
+
 // === Fonctions utilitaires ===
 
 // Hash simple d'un mot de passe
@@ -113,5 +129,15 @@ const char* session_get_current_name(void);
 
 // Vérifie si la session actuelle est admin
 int session_is_admin(void);
+
+// Retourne l'index (UID) de la session courante dans g_session_manager.sessions[]
+// Retourne UID_SYSTEM (0xFFFF) si personne n'est connecté
+uint16_t session_get_uid(void);
+
+// Retourne l'index d'une session par son nom, -1 si introuvable
+int session_get_index_by_name(const char* name);
+
+// Retourne le nom d'une session par son uid (index), NULL si invalide
+const char* session_get_name_by_uid(uint16_t uid);
 
 #endif // SESSION_H
