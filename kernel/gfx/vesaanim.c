@@ -1,7 +1,7 @@
 // vesa_anim.c - Animation de chargement circulaire style Windows
-#include "vesaanim.h"
-#include "vesa.h"
-#include "vesa_font.h"
+#include "../gfx/vesaanim.h"
+#include "../drivers/vesa.h"
+#include "../drivers/vesa_font.h"
 #include <stdint.h>
 
 // ============================================================
@@ -151,8 +151,8 @@ static void delay_ms(int ms) {
 #define ARC_LEN     4       // longueur de l'arc lumineux
 #define SPIN_R      36      // rayon du spinner (px)
 #define DOT_R       4       // rayon de chaque point (px)
-#define SPIN_FRAMES 100      // frames par tour complet
-#define N_LOOPS     10       // nombre de tours avant de finir
+#define SPIN_FRAMES 600      // frames par tour complet
+#define N_LOOPS     5       // nombre de tours avant de finir
 
 void vesa_boot_anim(void) {
     if (!vesa_active()) return;

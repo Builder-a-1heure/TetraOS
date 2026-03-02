@@ -1,10 +1,10 @@
 // tex.c - TetraOS Executable System Implementation
 // Version modifiée : Commandes SANS préfixe #
 #include "tex.h"
-#include "screen.h"
-#include "utils.h"
-#include "fs.h"
-#include "input.h"
+#include "../gfx/screen.h"
+#include "../lib/utils.h"
+#include "../fs/fs.h"
+#include "../drivers/input.h"
 
 // ============================================================================
 // FONCTIONS UTILITAIRES INTERNES

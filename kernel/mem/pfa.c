@@ -1,5 +1,5 @@
 #include "pfa.h"
-#include "utils.h"
+#include "../lib/utils.h"
 #define FRAME_SIZE 4096U
 static uint8_t *bitmap = 0;
 static size_t bitmap_bits = 0;

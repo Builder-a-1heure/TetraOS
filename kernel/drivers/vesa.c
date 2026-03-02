@@ -1,5 +1,5 @@
-#include "vesa.h"
-#include "vesa_font.h"
+#include "../drivers/vesa.h"
+#include "../drivers/vesa_font.h"
 #include <stdint.h>
 
 // ============================================================
@@ -29,30 +29,34 @@ int vesa_text_rows(void)    { return (int)(g_height / FONT_H); }
 #define DIRTY_COLS  240
 #define DIRTY_ROWS  68
 
-// Index de couleur compact (0=BG, 1=FG, 2=FG_BRIGHT, 3=SCROLL_BG, 4=SCROLL_FG)
+// Dirty buffer : stocke le dernier état rendu de chaque cellule.
+// On utilise les couleurs 32bpp complètes pour éviter les collisions
+// entre couleurs non répertoriées (bug texte UI qui disparaît).
+// Optimisation mémoire : on tronque à 24 bits (bits 23:0) — suffisant
+// pour distinguer toutes les couleurs de la palette.
 typedef struct {
-    char    ch;
-    uint8_t fg_idx;
-    uint8_t bg_idx;
-} DrawnCell;  // 3 bytes par cellule au lieu de 9
+    char     ch;
+    uint8_t  fg_b0;   // couleur fg bits  7:0
+    uint8_t  fg_b1;   // couleur fg bits 15:8
+    uint8_t  fg_b2;   // couleur fg bits 23:16
+    uint8_t  bg_b0;
+    uint8_t  bg_b1;
+    uint8_t  bg_b2;
+} DrawnCell;  // 7 bytes par cellule
 static DrawnCell g_drawn[DIRTY_ROWS][DIRTY_COLS];
 static int       g_dirty_init = 0;
-
-// Convertit une couleur 32bpp en index compact
-static uint8_t color_to_idx(uint32_t c) {
-    if (c == COLOR_FG)         return 1;
-    if (c == COLOR_FG_BRIGHT)  return 2;
-    if (c == COLOR_SCROLL_BG)  return 3;
-    if (c == COLOR_SCROLL_FG)  return 4;
-    return 0; // COLOR_BG ou inconnu
-}
 
 static void dirty_reset(void) {
     for (int r = 0; r < DIRTY_ROWS; r++)
         for (int c = 0; c < DIRTY_COLS; c++) {
-            g_drawn[r][c].ch     = 0xFF;
-            g_drawn[r][c].fg_idx = 0xFF;
-            g_drawn[r][c].bg_idx = 0xFF;
+            // 0xFF dans ch = valeur impossible → force le redraw
+            g_drawn[r][c].ch   = (char)0xFF;
+            g_drawn[r][c].fg_b0 = 0xFF;
+            g_drawn[r][c].fg_b1 = 0xFF;
+            g_drawn[r][c].fg_b2 = 0xFF;
+            g_drawn[r][c].bg_b0 = 0xFF;
+            g_drawn[r][c].bg_b1 = 0xFF;
+            g_drawn[r][c].bg_b2 = 0xFF;
         }
     g_dirty_init = 1;
 }
@@ -115,12 +119,16 @@ void vesa_draw_glyph(int px, int py, char c, uint32_t fg, uint32_t bg) {
     if (!g_dirty_init) dirty_reset();
     if (col < DIRTY_COLS && row < DIRTY_ROWS) {
         DrawnCell* cell = &g_drawn[row][col];
-        uint8_t fi = color_to_idx(fg);
-        uint8_t bi = color_to_idx(bg);
-        if (cell->ch == c && cell->fg_idx == fi && cell->bg_idx == bi) return;
-        cell->ch     = c;
-        cell->fg_idx = fi;
-        cell->bg_idx = bi;
+        // Comparaison couleur complète sur 24 bits (bits 23:0)
+        uint8_t fg0 = fg & 0xFF, fg1 = (fg>>8)&0xFF, fg2 = (fg>>16)&0xFF;
+        uint8_t bg0 = bg & 0xFF, bg1 = (bg>>8)&0xFF, bg2 = (bg>>16)&0xFF;
+        if (cell->ch == c &&
+            cell->fg_b0 == fg0 && cell->fg_b1 == fg1 && cell->fg_b2 == fg2 &&
+            cell->bg_b0 == bg0 && cell->bg_b1 == bg1 && cell->bg_b2 == bg2)
+            return;
+        cell->ch    = c;
+        cell->fg_b0 = fg0; cell->fg_b1 = fg1; cell->fg_b2 = fg2;
+        cell->bg_b0 = bg0; cell->bg_b1 = bg1; cell->bg_b2 = bg2;
     }
     draw_glyph_raw(px, py, c, fg, bg);
 }
@@ -129,9 +137,9 @@ void vesa_draw_glyph(int px, int py, char c, uint32_t fg, uint32_t bg) {
 void vesa_invalidate_cell(int col, int row) {
     if (!g_dirty_init) dirty_reset();
     if (col >= 0 && col < DIRTY_COLS && row >= 0 && row < DIRTY_ROWS) {
-        g_drawn[row][col].ch     = 0xFF;  // valeur impossible → forcera le redraw
-        g_drawn[row][col].fg_idx = 0xFF;
-        g_drawn[row][col].bg_idx = 0xFF;
+        g_drawn[row][col].ch    = (char)0xFF;
+        g_drawn[row][col].fg_b0 = 0xFF; g_drawn[row][col].fg_b1 = 0xFF; g_drawn[row][col].fg_b2 = 0xFF;
+        g_drawn[row][col].bg_b0 = 0xFF; g_drawn[row][col].bg_b1 = 0xFF; g_drawn[row][col].bg_b2 = 0xFF;
     }
 }
 

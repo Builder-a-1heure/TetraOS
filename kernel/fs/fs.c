@@ -1,9 +1,9 @@
 // fs.c - RAY64 hierarchical filesystem implementation
-#include "fs.h"
-#include "utils.h"
-#include "screen.h"
-#include "ata.h"
-#include "session.h"
+#include "../fs/fs.h"
+#include "../lib/utils.h"
+#include "../gfx/screen.h"
+#include "../drivers/ata.h"
+#include "../ui/session.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "tex_doc_content.h"

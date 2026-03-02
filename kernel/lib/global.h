@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "fs.h" 
-#include "screen.h"
-#include "ata.h"
+#include "../fs/fs.h" 
+#include "../gfx/screen.h"
+#include "../drivers/ata.h"
 
 // Déclarations externes
 extern char input_buffer[512];

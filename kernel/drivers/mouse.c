@@ -3,9 +3,9 @@
 // On n'utilise pas d'interruptions : polling pur via le status byte du port 0x64.
 // Un paquet souris = 3 octets : [flags, dx, dy]
 
-#include "mouse.h"
-#include "vesa.h"
-#include "screen.h"
+#include "../drivers/mouse.h"
+#include "../drivers/vesa.h"
+#include "../gfx/screen.h"
 
 // ============================================================
 // Ports I/O
@@ -80,6 +80,9 @@ static int      g_cursor_saved_y = -1;
 static uint8_t  g_pkt[3];
 static int      g_pkt_idx = 0;
 
+// Retourne 1 si on est en milieu de réception d'un paquet (octets 2 ou 3)
+int mouse_in_packet(void) { return g_pkt_idx > 0; }
+
 // ============================================================
 // Initialisation
 // ============================================================
@@ -137,18 +140,13 @@ int mouse_poll(void) {
     // Aucune donnée disponible
     if (!(st & STATUS_OUTPUT_FULL)) return 0;
 
-    // Lire l'octet — on accepte qu'il vienne du clavier ou de la souris
-    // car en polling pur sans IRQ, le bit 5 peut être peu fiable
+    // On lit l'octet dès que le buffer est plein.
+    // On NE filtre PAS sur bit5 ici car certaines VMs (QEMU, VirtualBox)
+    // ne le mettent pas systématiquement. La resynchronisation se fait
+    // uniquement via le bit3 du premier octet (toujours à 1 dans un paquet souris).
+    // Le dispatcher clavier (input_dispatch_char) vérifie bit5 AVANT d'appeler
+    // mouse_poll(), donc on n'arrive ici que si c'est bien de la souris.
     uint8_t byte = inb(PORT_DATA);
-
-    // Si c'est clairement une donnée clavier (bit 5 = 0 dans le status
-    // qu'on a lu), on la remet "dans le clavier" en ne la traitant pas
-    // comme souris — mais on ne peut pas la remettre dans le buffer.
-    // Solution : on ne lit que si bit 5 est set OU si on est en milieu de paquet
-    if (g_pkt_idx == 0 && !(st & STATUS_MOUSE_DATA)) {
-        // Premier octet et bit 5 pas set → probablement clavier, ignorer
-        return 0;
-    }
 
     g_pkt[g_pkt_idx++] = byte;
 
@@ -226,10 +224,20 @@ static const uint8_t cursor_shape[CH][CW] = {
 #define CURSOR_COLOR_OUTLINE  0x00000000  // Noir
 #define CURSOR_COLOR_FILL     0x00FFFFFF  // Blanc
 
+// Invalide le curseur sauvegardé — à appeler après tout vesa_fill() ou
+// changement de contexte graphique (ex: transition login → bureau)
+void mouse_reset_cursor(void) {
+    g_cursor_saved   = 0;
+    g_cursor_saved_x = -1;
+    g_cursor_saved_y = -1;
+}
+
 void mouse_erase_cursor(void) {
     if (!g_cursor_saved || !vesa_active()) return;
     int sw = (int)vesa_width();
     int sh = (int)vesa_height();
+
+    // Restaurer les pixels d'arrière-plan
     for (int row = 0; row < CH; row++) {
         for (int col = 0; col < CW; col++) {
             int px = g_cursor_saved_x + col;
@@ -238,6 +246,19 @@ void mouse_erase_cursor(void) {
                 vesa_put_pixel(px, py, g_cursor_bg[row * CW + col]);
         }
     }
+
+    // Invalider les cellules de la grille glyphe recouvertes par le curseur.
+    // vesa_put_pixel() écrit directement dans le framebuffer en bypassant
+    // le dirty tracker — sans invalidation, vesa_draw_glyph() croirait les
+    // cellules inchangées et ne redessinerait pas le texte qui était dessous.
+    int cell_x0 = g_cursor_saved_x / FONT_W;
+    int cell_y0 = g_cursor_saved_y / FONT_H;
+    int cell_x1 = (g_cursor_saved_x + CW - 1) / FONT_W;
+    int cell_y1 = (g_cursor_saved_y + CH - 1) / FONT_H;
+    for (int cy = cell_y0; cy <= cell_y1; cy++)
+        for (int cx = cell_x0; cx <= cell_x1; cx++)
+            vesa_invalidate_cell(cx, cy);
+
     g_cursor_saved = 0;
 }
 

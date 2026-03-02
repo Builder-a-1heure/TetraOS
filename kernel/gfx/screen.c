@@ -1,5 +1,5 @@
-#include "screen.h"
-#include "vesa.h"
+#include "../gfx/screen.h"
+#include "../drivers/vesa.h"
 
 int g_text_cols = VGA_COLS;
 int g_text_rows = VGA_ROWS;
@@ -159,6 +159,12 @@ void screen_end_ui(void) {
 void screen_exit_ui(void) {
     g_ui_drawing = 0;
     g_screen_dirty = 0;
+    // Invalider le curseur sauvegardé : le framebuffer va être écrasé par
+    // vesa_fill(), les pixels sauvegardés seraient ceux de l'ancien contexte
+    // (ex: login). Sans ça, le premier mouse_erase_cursor() dans le nouveau
+    // contexte (bureau) restaurerait des pixels corrompus.
+    extern void mouse_reset_cursor(void);
+    mouse_reset_cursor();
     if (vesa_active()) {
         vesa_fill(COLOR_BG);
         vesa_invalidate_all();
@@ -417,6 +423,10 @@ void screen_clear_visible(void) {
     }
     sb_write_row = sb_view;
     cursor_col   = 0;
+    if (vesa_active()) {
+        vesa_fill(COLOR_BG);
+        vesa_invalidate_all();
+    }
     screen_render();
 }
 
@@ -445,6 +455,14 @@ void clear_screen(void) {
     cursor_col   = 0;
     cursor_row   = 0;
     for (int r = 0; r < SCROLLBACK_LINES; r++) sb_clear_line(r);
+    if (vesa_active()) {
+        // Effacer physiquement le framebuffer ET invalider le dirty tracker
+        // pour forcer le redraw complet — sinon les anciennes cellules
+        // semblent "inchangées" (espace/noir = espace/noir) et ne sont
+        // pas redessinées, laissant des artifacts visuels.
+        vesa_fill(COLOR_BG);
+        vesa_invalidate_all();
+    }
     screen_render();
 }
 

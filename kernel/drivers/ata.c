@@ -1,7 +1,7 @@
-#include "ata.h"
-#include "io.h"
-#include "screen.h"
-#include "utils.h"
+#include "../drivers/ata.h"
+#include "../lib/io.h"
+#include "../gfx/screen.h"
+#include "../lib/utils.h"
 
 #define ATA_DATA        0x1F0
 #define ATA_ERROR       0x1F1

@@ -1,5 +1,5 @@
-#include "boot_info.h"
-#include "mem_boot.h"
+#include "../lib/boot_info.h"
+#include "../mem/mem_boot.h"
 void bootinfo_try_init(void) {
     boot_info_t *b = (boot_info_t*)BOOT_INFO_ADDR;
     if (b->signature != BOOT_INFO_SIG) return;

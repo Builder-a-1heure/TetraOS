@@ -1,0 +1,604 @@
+================================================================================
+  TetraOS v2.0 — INDEX DES FONCTIONS
+  Généré manuellement — à mettre à jour à chaque ajout/suppression de fonction
+================================================================================
+
+Structure du projet :
+  boot/        Bootloader ASM, stage2, linker script
+  drivers/     Pilotes matériels : VESA, VGA, souris PS/2, clavier, ATA
+  gfx/         Rendu graphique : screen (scrollback + primitives), animation boot
+  mem/         Gestion mémoire : allocateur boot, page frame allocator
+  fs/          Système de fichiers RAY64
+  ui/          Interface graphique : bureau, fenêtres, sessions/login
+  shell/       Point d'entrée kernel, shell texte, interpréteur TEX
+  lib/         Utilitaires C, I/O bas niveau, types globaux
+
+================================================================================
+  RÈGLES GÉNÉRALES FRAMEBUFFER
+================================================================================
+
+  ! IMPORTANT — Toute fonction qui écrit directement dans le framebuffer via
+  ! vesa_put_pixel() ou gfx_fill_rect() bypasse le dirty tracker de vesa.c.
+  ! Après un tel appel, il FAUT appeler vesa_invalidate_all() (ou
+  ! vesa_invalidate_cell()) pour que vesa_draw_glyph() redessine correctement
+  ! les glyphes concernés au prochain rendu.
+
+  Séquence correcte pour un bloc de dessin UI :
+      screen_begin_ui();
+          gfx_fill_rect(...)        // efface une zone
+          vesa_invalidate_all();    // invalide les cellules de cette zone
+          gfx_draw_text(...)        // redessine le texte
+      screen_end_ui();              // flush vers le framebuffer
+
+================================================================================
+  drivers/vesa.c — Pilote framebuffer VESA
+================================================================================
+
+int  vesa_init(void)
+  Lit la structure VESA laissée par stage2 à 0x9000 (magic, fb_addr, pitch,
+  w, h, bpp). Initialise le framebuffer. Retourne 1 si OK, 0 sinon.
+  Appel : une seule fois dans screen_init().
+
+int  vesa_active(void)
+  Retourne 1 si le mode VESA est actif, 0 si on est en VGA texte.
+  Appel : vesa_active() — testé partout avant tout dessin pixel.
+
+uint32_t vesa_width(void)
+uint32_t vesa_height(void)
+uint32_t vesa_pitch(void)
+uint32_t vesa_fb_addr(void)
+  Getters sur les dimensions et l'adresse du framebuffer.
+
+int  vesa_text_cols(void)
+int  vesa_text_rows(void)
+  Nombre de colonnes/lignes de texte selon FONT_W/FONT_H et la résolution.
+
+void vesa_put_pixel(int x, int y, uint32_t color)
+  Écrit un pixel 32bpp directement dans le framebuffer. Bypass le dirty tracker.
+  ! Appeler vesa_invalidate_cell(x/FONT_W, y/FONT_H) après si du texte était là.
+
+uint32_t vesa_get_pixel(int x, int y)
+  Lit un pixel depuis le framebuffer (utilisé par mouse_draw_cursor pour
+  sauvegarder le fond avant de dessiner le curseur).
+
+void vesa_fill(uint32_t color)
+  Remplit tout le framebuffer d'une couleur + invalide tout le dirty buffer.
+  Appel : vesa_fill(COLOR_BG) — utilisé dans clear_screen() et screen_exit_ui().
+
+void vesa_draw_glyph(int px, int py, char c, uint32_t fg, uint32_t bg)
+  Dessine un glyphe 8×16 en px/py pixels. Utilise le dirty tracker : si la
+  cellule (px/FONT_W, py/FONT_H) a déjà ce char+fg+bg, ne redessine pas.
+  Appel : vesa_draw_glyph(col*FONT_W, row*FONT_H, ch, fg, bg)
+
+void vesa_invalidate_cell(int col, int row)
+  Marque une cellule de la grille glyphe comme "à redessiner".
+  Appel : vesa_invalidate_cell(x/FONT_W, y/FONT_H)
+
+void vesa_invalidate_all(void)
+  Invalide tout le dirty buffer — le prochain vesa_draw_glyph() redessinera
+  toutes les cellules même si char+couleur semblent inchangés.
+  ! À appeler après tout gfx_fill_rect() ou vesa_put_pixel() qui écrase du texte.
+
+void vesa_clear_glyph(int col, int row, uint32_t bg)
+  Efface une cellule en dessinant un espace avec la couleur de fond.
+
+================================================================================
+  drivers/mouse.c — Pilote souris PS/2
+================================================================================
+
+void mouse_init(void)
+  Initialise le contrôleur 8042 : active le port auxiliaire, désactive IRQ12
+  (polling pur), reset la souris, active le streaming.
+  Appel : mouse_init() dans kmain(), après screen_init().
+
+int  mouse_poll(void)
+  Polling non-bloquant : lit un octet si disponible (bit0 du status 0x64).
+  Accumule les 3 octets d'un paquet PS/2. Retourne 1 quand un paquet complet
+  est décodé et g_mouse mis à jour, 0 sinon.
+  Resynchronisation via bit3 du premier octet (toujours 1 dans un paquet souris).
+  Appel : while (mouse_poll()) mouse_moved = 1;
+
+int  mouse_in_packet(void)
+  Retourne 1 si on est en cours de réception d'un paquet (octets 2 ou 3).
+  Utilisé par input_dispatch_char() pour éviter de lire un scancode clavier
+  pendant la réception d'un paquet souris.
+
+void mouse_draw_cursor(void)
+  Sauvegarde les pixels sous le curseur dans g_cursor_bg[], puis dessine
+  la flèche (12×19 pixels, bitmap 1bpp). À appeler après mouse_erase_cursor().
+  Appel : mouse_draw_cursor() après tout redraw du fond.
+
+void mouse_erase_cursor(void)
+  Restaure les pixels sauvegardés (efface la flèche), puis invalide les cellules
+  de la grille glyphe recouvertes pour forcer leur redraw par vesa_draw_glyph().
+  ! Toujours appeler mouse_erase_cursor() AVANT de redessiner le fond.
+  Appel : mouse_erase_cursor() avant tout gfx_fill_rect() / desktop_redraw_all().
+
+void mouse_reset_cursor(void)
+  Invalide le curseur sauvegardé sans restaurer les pixels. À appeler après
+  vesa_fill() ou screen_exit_ui() pour éviter de restaurer un fond périmé.
+  Appel : automatiquement dans screen_exit_ui().
+
+  Accès à l'état courant : extern MouseState g_mouse;
+    g_mouse.x, g_mouse.y       — position en pixels
+    g_mouse.btn_left/right/middle — état des boutons (1=enfoncé)
+
+================================================================================
+  drivers/input.c — Clavier PS/2 + dispatcher 8042
+================================================================================
+
+char input_dispatch_char(void)
+  DISPATCHER CENTRALISÉ. Lit le status register 0x64 :
+    bit5=1 → appelle mouse_poll() + redraw curseur, retourne 0
+    bit5=0 → lit le scancode et le décode, retourne le char (ou 0 si modificateur)
+  C'est la brique de base pour tout polling clavier+souris simultané.
+  Appel : char c = input_dispatch_char(); if (c) { ... }
+
+char keyboard_get_char(void)
+  Bloque jusqu'à obtenir un vrai caractère clavier (ignore les événements souris
+  mais les traite au passage via input_dispatch_char).
+  Appel : char c = keyboard_get_char();
+
+char get_input_char(void)
+  Version simplifiée sans gestion souris. Utilisée dans les contextes purement
+  texte (avant l'init de la souris).
+
+int  keyboard_read_scancode(void)
+  Lit un scancode brut depuis le port 0x60 (bloquant). Usage interne.
+
+void handle_input(void)
+  Boucle de saisie bloquante pour le mode shell texte (non-VESA). Usage interne.
+
+  Variables globales accessibles :
+    extern int shift_pressed;   — état de la touche Shift
+    extern int ctrl_pressed;    — état de la touche Ctrl
+    extern char input_buffer[]; — buffer de saisie courant
+    extern int  input_index;    — indice d'écriture dans input_buffer
+
+================================================================================
+  drivers/ata.c — Pilote disque ATA PIO
+================================================================================
+
+void ata_init(void)
+  Détecte et initialise le disque ATA primaire.
+  Appel : ata_init() dans kmain().
+
+int  ata_read(uint32_t lba, uint8_t* buffer, uint32_t count)
+  Lit `count` secteurs depuis le LBA `lba` dans `buffer`.
+  Retourne 0 si OK, -1 si erreur.
+
+int  ata_write(uint32_t lba, const uint8_t* buffer, uint32_t count)
+  Écrit `count` secteurs vers le LBA `lba` depuis `buffer`.
+  Retourne 0 si OK, -1 si erreur.
+
+int  ata_read_single(uint32_t lba, uint8_t* buffer)
+  Raccourci : lit exactement 1 secteur (512 octets).
+
+int  ata_write_single(uint32_t lba, const uint8_t* buffer)
+  Raccourci : écrit exactement 1 secteur.
+
+================================================================================
+  gfx/screen.c — Scrollback texte + primitives graphiques
+================================================================================
+
+--- Initialisation ---
+
+void screen_init(void)
+  Init VESA (ou VGA en fallback), fixe g_text_cols/g_text_rows.
+  Appel : première chose dans kmain().
+
+--- Cycle de rendu UI ---
+
+void screen_begin_ui(void)
+  Commence un bloc de dessin UI : suspend les flushes automatiques.
+  Tout gfx_*() / vesa_draw_glyph() appelé entre begin et end est accumulé.
+
+void screen_end_ui(void)
+  Termine le bloc : flush le framebuffer si des changements sont en attente.
+
+void screen_exit_ui(void)
+  Quitte l'UI graphique pour revenir au terminal texte : vesa_fill(BG),
+  invalide tout, appelle mouse_reset_cursor(). Utilisé à la fin du login.
+
+void screen_flush(void)
+  Force un rendu immédiat sans passer par le dirty flag.
+
+void screen_invalidate(void)
+  Marque l'écran comme devant être redessiné (sans redessiner immédiatement).
+
+--- Scrollback texte ---
+
+void print_char(char c)
+  Écrit un caractère dans le scrollback (ou redirige vers g_print_hook si
+  le terminal fenêtré est actif).
+
+void print_string(const char* str)
+  Écrit une chaîne dans le scrollback.
+
+void print_int(int num)
+void print_hex(uint32_t num)
+void print_dec(uint32_t num)
+  Formatage numérique vers le scrollback.
+
+void clear_screen(void)
+  Vide le scrollback + efface physiquement le framebuffer + invalide le dirty
+  buffer. Évite les artifacts visuels.
+
+void screen_clear_visible(void)
+  Vide uniquement la zone visible (sans toucher à l'historique scrollback).
+
+void screen_scroll_up(void)
+void screen_scroll_down(void)
+void screen_goto_bottom(void)
+int  screen_at_bottom(void)
+  Navigation dans le scrollback.
+
+void set_cursor(int row, int col)
+void update_cursor(void)
+  Positionnement du curseur texte.
+
+  Hook de redirection :
+    extern CharOutputFn g_print_hook;
+    Si non-NULL, print_char()/print_string() appellent g_print_hook(c) au lieu
+    d'écrire dans le scrollback. Utilisé par le terminal fenêtré de desktop.c.
+
+--- Primitives graphiques (pixels, mode VESA uniquement) ---
+
+void gfx_fill_rect(int x, int y, int w, int h, uint32_t color)
+  Rectangle plein. Bypass le dirty tracker.
+  ! Appeler vesa_invalidate_all() après si du texte était dans la zone.
+
+void gfx_draw_rect(int x, int y, int w, int h, uint32_t color)
+  Contour de rectangle (1px).
+
+void gfx_draw_line(int x0, int y0, int x1, int y1, uint32_t color)
+  Ligne de Bresenham.
+
+void gfx_draw_circle(int cx, int cy, int r, uint32_t color)
+  Cercle (Midpoint circle algorithm).
+
+void gfx_fill_circle(int cx, int cy, int r, uint32_t color)
+  Cercle plein.
+
+void gfx_gradient_h(int x, int y, int w, int h, uint32_t col_left, uint32_t col_right)
+  Dégradé horizontal gauche→droite.
+
+void gfx_gradient_v(int x, int y, int w, int h, uint32_t col_top, uint32_t col_bot)
+  Dégradé vertical haut→bas.
+
+void gfx_draw_text(int x, int y, const char* str, uint32_t fg, uint32_t bg)
+  Texte en pixels (utilise vesa_draw_glyph).
+
+void gfx_draw_text_centered(int x, int y, int w, const char* str, uint32_t fg, uint32_t bg)
+  Texte centré horizontalement dans une zone de largeur w.
+
+void draw_box(int x1, int y1, int x2, int y2)
+  Boîte en coordonnées caractères (VGA) ou pixels (VESA).
+
+void clear_area(int x1, int y1, int x2, int y2)
+  Efface une zone en coordonnées caractères.
+
+================================================================================
+  gfx/vesaanim.c — Animation de démarrage
+================================================================================
+
+void vesa_boot_anim(void)
+  Joue l'animation de boot (cercles, dégradés, texte). Bloquant ~2s.
+  Appel : vesa_boot_anim() dans kmain() après fs_init().
+
+================================================================================
+  fs/fs.c — Système de fichiers RAY64
+================================================================================
+
+void fs_init(void)
+  Monte le FS depuis le disque ATA. Si le magic RAY64 est absent, formate.
+  Appel : fs_init() dans kmain().
+
+void fs_format(void)
+  Formate le disque : écrit l'en-tête RAY64 et le répertoire racine vide.
+
+int  fs_flush(void)
+  Écrit les métadonnées modifiées sur disque. À appeler après toute écriture.
+
+int  fs_find(const char* name)
+  Cherche un fichier/dossier par nom dans le répertoire courant.
+  Retourne l'index du nœud, ou -1 si non trouvé.
+
+int  fs_find_in_dir(uint32_t dir_idx, const char* name)
+  Cherche dans un répertoire spécifique (par index).
+
+int  fs_read_file(const char* name, uint8_t* out, uint32_t max_len)
+  Lit le contenu d'un fichier dans `out`. Retourne le nombre d'octets lus.
+
+int  fs_write_file(const char* name, const uint8_t* data, uint32_t size)
+  Crée ou écrase un fichier. Retourne l'index du nœud ou -1 si erreur.
+
+int  fs_mkdir(const char* name)
+  Crée un répertoire dans le répertoire courant.
+
+int  fs_mkdir_in_dir(uint32_t parent_idx, const char* name)
+  Crée un répertoire dans un parent spécifique.
+
+int  fs_add(const char* name)
+  Crée un fichier vide dans le répertoire courant.
+
+int  fs_delete(const char* name)
+  Supprime un fichier ou répertoire (répertoire doit être vide).
+
+int  fs_cd(const char* name)
+  Change le répertoire courant. ".." pour remonter.
+
+void fs_ls(void)
+  Liste le contenu du répertoire courant (print_string).
+
+void fs_pwd(void)
+  Affiche le chemin absolu courant.
+
+void fs_tree(void)
+  Affiche l'arborescence complète depuis la racine.
+
+int  fs_chmod(const char* name, uint16_t new_perms)
+  Change les permissions d'un nœud.
+
+int  fs_chown(const char* name, uint16_t new_uid)
+  Change le propriétaire d'un nœud.
+
+int  fs_acl_check(uint32_t node_idx, AclOp op)
+  Vérifie si la session courante a le droit d'effectuer l'opération op
+  sur le nœud node_idx. Retourne 1 si autorisé, 0 sinon.
+
+void fs_acl_set_node(uint32_t node_idx, uint16_t perms, uint16_t uid)
+  Définit les permissions et le propriétaire d'un nœud.
+
+void fs_acl_print(uint32_t node_idx)
+  Affiche les permissions d'un nœud (style ls -l).
+
+  Variables globales :
+    extern FSTable g_fs;   — table des nœuds du FS en mémoire
+    extern uint32_t g_cwd; — index du répertoire courant
+
+================================================================================
+  ui/session.c — Gestion des sessions et écran de login
+================================================================================
+
+void session_init(void)
+  Initialise la structure SessionManager (RAZ).
+  Appel : session_init() dans kmain().
+
+void session_load(void)
+void session_save(void)
+  Charge/sauvegarde les sessions depuis/vers le fichier "sessions" dans le FS.
+
+int  session_create(const char* name, const char* password, uint8_t is_admin)
+  Crée une nouvelle session. Retourne l'index ou -1 si erreur (nom existant,
+  trop de sessions, FS plein).
+
+int  session_delete(const char* name)
+  Supprime une session existante (admin uniquement).
+
+void session_list(void)
+  Affiche la liste des sessions (print_string).
+
+int  session_login(int session_index, const char* password)
+  Vérifie le mot de passe et ouvre la session. Retourne 0 si OK.
+
+void session_logout(void)
+  Ferme la session courante (RAZ de g_session_manager.logged_in).
+
+int  session_do_login_flow(void)
+  Lance l'interface graphique complète de login (sélection utilisateur +
+  saisie mot de passe). Retourne 0 si login réussi, -1 si erreur.
+  Appel : session_do_login_flow() dans la boucle principale de kmain().
+
+int  session_login_menu(void)
+  Affiche le menu de sélection d'utilisateur (navigation clavier).
+  Utilisé par session_do_login_flow().
+
+int  session_has_permission(Permission perm)
+  Retourne 1 si la session courante possède la permission perm.
+  Permissions définies dans session.h (PERM_*).
+
+void session_set_permission(int session_index, Permission perm, int value)
+void session_grant_all_permissions(int session_index)
+  Gestion des permissions par session.
+
+int  session_is_admin(void)
+  Retourne 1 si la session courante est admin.
+
+const char* session_get_current_name(void)
+  Retourne le nom de la session courante (ou "" si aucune).
+
+int  session_get_index_by_name(const char* name)
+  Retourne l'index d'une session par son nom, -1 si non trouvée.
+
+int  session_create_home_dir(int session_index)
+  Crée le répertoire home de la session dans le FS.
+
+void session_set_cwd_to_home(void)
+  Positionne g_cwd sur le répertoire home de la session courante.
+
+void session_hash_password(const char* password, char* hash_out)
+int  session_verify_password(const char* password, const char* hash)
+  Hachage XOR simple du mot de passe + vérification.
+
+================================================================================
+  ui/desktop.c — Bureau graphique et terminal fenêtré
+================================================================================
+
+void desktop_run(void)
+  Boucle principale du bureau graphique. Gère :
+    - Dessin du fond + icônes
+    - Polling souris + curseur
+    - Hover/clic sur les icônes
+    - Ouverture/fermeture/drag de la fenêtre terminal
+    - Appel à run_terminal_shell() quand le terminal est ouvert
+  Retourne quand g_session_manager.logged_in passe à 0 (logout).
+  Appel : desktop_run() dans la boucle principale de kmain().
+
+  Fonctions internes (static) — non appelables de l'extérieur :
+
+  draw_background()       Dégradé de fond du bureau
+  draw_taskbar()          Barre des tâches (bas d'écran)
+  draw_icon()             Icône sur le bureau
+  draw_window(focused)    Fenêtre terminal (chrome : titlebar, bordure, bouton X)
+  draw_terminal_content() Contenu texte de la fenêtre (lignes du buffer g_term)
+  desktop_redraw_all()    Redraw complet fond + éléments UI + terminal
+  term_redraw_content()   Redraw partiel du contenu texte seulement
+
+  term_init()             Initialise le buffer g_term (TERM_LINES × TERM_COLS)
+  term_putchar(c)         Écrit un char dans g_term (newline, backspace, scroll)
+  term_puts(s)            Écrit une chaîne dans g_term
+  term_getchar()          Lit un char depuis le clavier (via input_dispatch_char)
+                          Gère aussi le drag de fenêtre et le scroll terminal
+
+  run_terminal_shell()    Shell interactif dans la fenêtre. Installe g_print_hook
+                          = term_putchar pour rediriger print_*() vers g_term.
+                          Boucle saisie→dispatch_*() jusqu'au logout.
+
+================================================================================
+  shell/main.c — Point d'entrée kernel + shell texte
+================================================================================
+
+void kmain(void)
+  Séquence de boot :
+    screen_init() → clear_screen() → ata_init() → fs_init() →
+    vesa_boot_anim() → session_init() → session_load() → mouse_init() →
+    boucle : session_do_login_flow() → desktop_run()
+
+void tetra_shell(void)
+  Shell texte brut (mode VGA ou fallback). Parse les commandes namespaced.
+  Utilisé avant l'init complète ou en mode dégradé.
+
+int  parse_namespaced(const char* input,
+                      char* mod_out, int mod_max,
+                      char* cmd_out, int cmd_max,
+                      char* args_out, int args_max)
+  Parse une commande "module.commande args" en trois parties.
+  Retourne 1 si le format est valide, 0 sinon.
+  Appel : parse_namespaced(s, mod, 32, cmd, 64, args, 192)
+
+void dispatch_ray64(const char* cmd, const char* args)
+  Traite les commandes du namespace "ray64" (gestion FS : ls, cd, mkdir, etc.)
+
+void dispatch_session(const char* cmd, const char* args)
+  Traite les commandes du namespace "session" (adduser, deluser, whoami, etc.)
+
+void dispatch_sys(const char* cmd, const char* args)
+  Traite les commandes du namespace "sys" (clear, shutdown, help, etc.)
+
+void dispatch_tex(const char* cmd, const char* args)
+  Traite les commandes du namespace "tex" (exécution de scripts TEX).
+
+void cmd_adduser(void)
+void cmd_deluser(void)
+void cmd_users(void)
+void cmd_whoami(void)
+  Commandes utilisateur accessibles depuis tetra_shell().
+
+void cmd_sl(void)
+  Easter egg : animation de train ASCII.
+
+void windowed_write(const char* filename)
+  Éditeur de texte fenêtré (mode VESA). Ouvre un fichier du FS,
+  permet l'édition et sauvegarde avec Ctrl+S.
+
+void read_line(char* buffer, int max_len)
+  Saisie d'une ligne texte dans le terminal (bloquant).
+
+void draw_editor_window(const char* filename, const char* content,
+                        int cursor_pos, int scroll_offset)
+  Rendu graphique de l'éditeur texte fenêtré. Appelé par windowed_write().
+
+================================================================================
+  shell/tex.c — Interpréteur de scripts TEX
+================================================================================
+
+void tex_init(TexContext* ctx)
+  Initialise un contexte TEX (variables, état).
+
+void tex_cleanup(TexContext* ctx)
+  Libère les ressources du contexte.
+
+int  tex_set_var(TexContext* ctx, const char* name, VarType type,
+                 void* value, int is_const)
+  Définit ou met à jour une variable dans le contexte.
+
+void tex_eval_string(TexContext* ctx, const char* expr, char* out, int max_len)
+  Évalue une expression string (substitution de variables $nom).
+
+int  tex_eval_condition(TexContext* ctx, const char* condition)
+  Évalue une condition booléenne (==, !=, <, >, &&, ||).
+
+int  tex_execute_line(TexContext* ctx, const char* line)
+  Exécute une ligne de script TEX. Retourne 0=OK, 1=stop, -1=erreur.
+
+int  tex_execute(const char* filename)
+  Charge et exécute un fichier script .tex depuis le FS.
+  Appel : tex_execute("monscript.tex")
+
+================================================================================
+  lib/utils.c — Utilitaires C standard (implémentation bare metal)
+================================================================================
+
+int   strcmp(const char* s1, const char* s2)
+int   strncmp(const char* s1, const char* s2, size_t n)
+int   strcasecmp(const char* s1, const char* s2)
+int   memcmp(const void* s1, const void* s2, size_t n)
+int   snprintf(char* out, size_t n, const char* fmt, ...)
+  Implémentations légères sans libc. Disponibles partout via utils.h.
+
+================================================================================
+  lib/io.h — Accès aux ports I/O x86 (inline)
+================================================================================
+
+  static inline uint8_t  inb(uint16_t port)
+  static inline void     outb(uint16_t port, uint8_t val)
+  static inline uint16_t inw(uint16_t port)
+  static inline void     outw(uint16_t port, uint16_t val)
+
+  ! io.h définit inb/outb comme static inline.
+  ! mouse.c et input.c définissent leurs propres versions locales inline
+  ! pour éviter les conflits de linkage. Ne pas inclure io.h dans ces fichiers.
+
+================================================================================
+  mem/pfa.c — Page Frame Allocator
+================================================================================
+
+void pfa_init(uintptr_t phys_base, size_t mem_size_bytes)
+  Initialise le bitmap des frames physiques disponibles.
+
+void pfa_free_frame(uintptr_t frame_addr)
+  Marque une frame physique comme libre.
+
+================================================================================
+  mem/mem_boot.c — Allocateur mémoire de démarrage
+================================================================================
+
+void mem_boot_init(uintptr_t phys_base, size_t phys_size)
+  Initialise le heap de boot (allocateur linéaire simple, sans free).
+
+================================================================================
+  CONSTANTES ET COULEURS IMPORTANTES
+================================================================================
+
+  Définies dans drivers/vesa.h :
+    COLOR_BG         0x00000000  Fond noir terminal
+    COLOR_FG         0x00CCCCCC  Texte gris clair
+    COLOR_FG_BRIGHT  0x00FFFFFF  Texte blanc vif
+    COLOR_SCROLL_BG  0x00222244  Fond bandeau scroll
+    COLOR_SCROLL_FG  0x00AAAAFF  Texte bandeau scroll
+    FONT_W  8   Largeur d'un glyphe en pixels
+    FONT_H  16  Hauteur d'un glyphe en pixels
+
+  Définies dans ui/desktop.c (locales) :
+    WIN_BG, WIN_TITLEBAR, WIN_TITLE_ACT, WIN_BORDER, WIN_BORDER_ACT
+    WIN_TEXT_FG, WIN_TEXT_BG, WIN_PROMPT
+    DT_BG_TOP, DT_BG_BOT, DT_TASKBAR_BG, DT_ICON_BG, DT_ICON_BORDER, etc.
+
+  Définies dans ui/session.c (locales) :
+    UI_DARK, UI_ACCENT, UI_ACCENT2, UI_WHITE, UI_GRAY, UI_GREEN,
+    UI_RED, UI_ADMIN, UI_SELECTED
+
+================================================================================
+  FIN DE L'INDEX
+================================================================================

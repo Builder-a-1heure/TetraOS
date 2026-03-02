@@ -1,7 +1,7 @@
-#include "screen.h"
-#include "fs.h"
-#include "input.h"
-#include "mouse.h"
+#include "../gfx/screen.h"
+#include "../fs/fs.h"
+#include "../drivers/input.h"
+#include "../drivers/mouse.h"
 #include <stdint.h>
 
 char input_buffer[512];
@@ -207,53 +207,45 @@ char get_input_char() {
     }
 }
 
-// CORRECTION BUG #3 : Meilleure gestion du flag ctrl_pressed
-char keyboard_get_char() {
-    // Réinitialiser ctrl_pressed au début pour éviter qu'il reste bloqué
-    static int last_ctrl_scancode = 0;
-
+// ============================================================
+// DISPATCHER CENTRALISÉ 8042
+// Principe : on lit le status register EN PREMIER et on route.
+//   bit0 = 1 : donnée disponible dans le buffer
+//   bit5 = 1 : elle vient de la souris (port auxiliaire)
+//   bit5 = 0 : elle vient du clavier
+// On ne lit JAMAIS le port 0x60 sans avoir vérifié bit5 d'abord.
+// ============================================================
+char input_dispatch_char(void) {
     while (1) {
-        // --- Polling souris (non-bloquant) ---
-        // On lit le status byte : bit 0 = donnée dispo, bit 5 = vient de la souris
-        unsigned char st;
+        uint8_t st;
         __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
 
-        if (st & 1) {
-            if (st & (1 << 5)) {
-                // Donnée souris → laisser mouse_poll la consommer
-                if (mouse_poll()) {
-                    mouse_erase_cursor();
-                    mouse_draw_cursor();
-                }
-                continue; // Pas de scancode clavier ici
-            }
-        } else {
-            // Rien à lire du tout → petit yield et on recommence
+        if (!(st & 1)) {
             __asm__ __volatile__("nop");
-            continue;
+            continue; // buffer vide
         }
 
-        // --- Donnée clavier (bit5 = 0, bit0 = 1) ---
-        unsigned char scancode;
+        if (st & (1 << 5)) {
+            // ── Donnée souris ──────────────────────────────────
+            if (mouse_poll()) {
+                mouse_erase_cursor();
+                mouse_draw_cursor();
+            }
+            return 0; // pas de caractère clavier
+        }
+
+        // ── Donnée clavier ─────────────────────────────────────
+        uint8_t scancode;
         __asm__ __volatile__("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
 
-        // Gestion des modificateurs Shift
-        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; continue; }
-        if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; continue; }
+        // Modificateurs
+        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return 0; }
+        if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return 0; }
+        if (scancode == 0x1D) { ctrl_pressed = 1;  return 0; }
+        if (scancode == 0x9D) { ctrl_pressed = 0;  return 0; }
 
-        // CORRECTION : Gestion améliorée de Ctrl
-        if (scancode == 0x1D) { ctrl_pressed = 1; last_ctrl_scancode = scancode; continue; }
-        if (scancode == 0x9D) { ctrl_pressed = 0; last_ctrl_scancode = 0; continue; }
-
-        // Ignorer les key-up events
-        if (scancode & 0x80) {
-            if (ctrl_pressed && last_ctrl_scancode != 0) {
-                static int release_count = 0;
-                release_count++;
-                if (release_count > 5) { ctrl_pressed = 0; last_ctrl_scancode = 0; release_count = 0; }
-            }
-            continue;
-        }
+        // Key-up → ignorer
+        if (scancode & 0x80) return 0;
 
         // Touches spéciales
         if (scancode == 0x01) return 27;   // ESC
@@ -263,15 +255,28 @@ char keyboard_get_char() {
         if (scancode == 0x4B) return 17;   // Flèche gauche
         if (scancode == 0x4D) return 18;   // Flèche droite
 
-        // Touches normales
-        if (scancode < (sizeof(keyboard_map)/sizeof(keyboard_map[0]))) {
-            char c = shift_pressed ? keyboard_map_shift[scancode] : keyboard_map[scancode];
-
-            if (ctrl_pressed && (c == 'c' || c == 'C')) { ctrl_pressed = 0; return 3; }
-            if (ctrl_pressed && (c == 's' || c == 'S')) { ctrl_pressed = 0; return 19; }
-            if (ctrl_pressed && (c == 'q' || c == 'Q')) { ctrl_pressed = 0; return 17; }
-
+        // Touche normale
+        if (scancode < 256) {
+            char c = shift_pressed ? (char)keyboard_map_shift[scancode]
+                                   : (char)keyboard_map[scancode];
+            if (ctrl_pressed) {
+                ctrl_pressed = 0;
+                if (c == 'c' || c == 'C') return 3;
+                if (c == 's' || c == 'S') return 19;
+                if (c == 'q' || c == 'Q') return 17;
+                return 0;
+            }
             if (c) return c;
         }
+        return 0;
+    }
+}
+
+// keyboard_get_char : bloque jusqu'à obtenir un vrai caractère clavier
+// (ignore les événements souris mais les traite au passage)
+char keyboard_get_char(void) {
+    while (1) {
+        char c = input_dispatch_char();
+        if (c != 0) return c;
     }
 }

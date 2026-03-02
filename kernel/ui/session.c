@@ -1,10 +1,10 @@
 // session.c - Implémentation du système de sessions
-#include "session.h"
-#include "screen.h"
-#include "vesa.h"
-#include "input.h"
-#include "fs.h"
-#include "utils.h"
+#include "../ui/session.h"
+#include "../gfx/screen.h"
+#include "../drivers/vesa.h"
+#include "../drivers/input.h"
+#include "../fs/fs.h"
+#include "../lib/utils.h"
 
 // Gestionnaire global de sessions
 SessionManager g_session_manager;
@@ -706,6 +706,7 @@ int session_do_login_flow(void) {
         int ni = 0;
         while (1) {
             screen_begin_ui();
+            vesa_invalidate_all(); // forcer le redraw complet des cellules de la zone
             gfx_fill_rect(nx+1, ny+1, nw-2, 26, 0x00111111);
             for (int k = 0; k < ni; k++) {
                 char tmp[2]; tmp[0] = admin_name[k]; tmp[1] = '\0';
@@ -725,6 +726,7 @@ int session_do_login_flow(void) {
         int pi = 0;
         while (1) {
             screen_begin_ui();
+            vesa_invalidate_all(); // forcer le redraw
             gfx_fill_rect(px2+1, py2+1, nw-2, 26, 0x00111111);
             for (int k = 0; k < pi; k++)
                 gfx_draw_text(px2 + 6 + k*FONT_W, py2+6, "*", UI_WHITE, 0x00111111);
@@ -836,6 +838,7 @@ int session_do_login_flow(void) {
         while (1) {
             // Redessiner uniquement la zone de saisie (pas le fond entier !)
             screen_begin_ui();
+            vesa_invalidate_all(); // les cellules ont le même char '*' → forcer le redraw
             gfx_fill_rect(input_x + 1, input_y + 1, input_w - 2, 26, 0x00111111);
             for (int k = 0; k < idx; k++)
                 gfx_draw_text(input_x + 6 + k * FONT_W, input_y + 6,
