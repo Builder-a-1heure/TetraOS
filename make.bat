@@ -16,9 +16,9 @@ REM  Objets intermédiaires : kernel\compilation\
 REM ============================================================
 
 REM === CONFIGURATION ===
-set GCC="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-gcc"
-set LD="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-ld"
-set OBJCOPY="R:\Project - TetraOS\TetraOS v2.0\i686\bin\i686-elf-objcopy"
+set GCC="i686\bin\i686-elf-gcc"
+set LD="i686\bin\i686-elf-ld"
+set OBJCOPY="i686\bin\i686-elf-objcopy"
 set NASM=nasm
 set QEMU="qemu\qemu-system-i386.exe"
 
