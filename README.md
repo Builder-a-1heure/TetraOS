@@ -19,10 +19,10 @@ Les autres outils de la chaîne de compilation sous windows sont inclus dans le 
 Pour compiler sous MacOS, vous aurez besoin d'installer via HomeBrew plusieurs packages (Qemu, Nasm et i686), voici les commandes pour l'installation de ces packages :
 
 HomeBrew (si pas déja fait ...) :
-'''/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" '''
+`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
 
 Tous les outils de la chaine :
-'''brew install i686-elf-gcc i686-elf-binutils nasm qemu'''
+`brew install i686-elf-gcc i686-elf-binutils nasm qemu`
 
 ## **Linux**
 Vous êtes assé fort pour installer les outils vous même (bon j'avoue j'ai juste la flemme d'aller chercher les commandes pour chaque distrib ou pour chaque config, deso ^_^) ...
