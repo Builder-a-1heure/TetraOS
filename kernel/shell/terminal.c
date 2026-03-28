@@ -14,8 +14,6 @@
 #include "shell.h"
 #include "../gfx/screen.h"
 #include "../drivers/input.h"
-#include "../drivers/mouse.h"
-#include "../drivers/vesa.h"
 #include "../ui/session.h"
 #include "../fs/fs.h"
 #include "../lib/utils.h"
@@ -37,9 +35,6 @@ uint32_t  g_term_bg      = 0x00050508;
 static uint32_t s_default_fg = 0x00CCDDFF;
 static uint32_t s_default_bg = 0x00050508;
 
-// Hook souris : desktop.c peut installer un callback pour gérer
-// les événements souris pendant terminal_getchar()
-static TermMouseHandlerFn s_mouse_handler = 0;
 
 // ============================================================
 // Buffer interne — helpers privés
@@ -131,7 +126,7 @@ void terminal_scroll_down(void) {
 // API publique — Hook souris
 // ============================================================
 void terminal_set_mouse_handler(TermMouseHandlerFn fn) {
-    s_mouse_handler = fn;
+    input_set_mouse_packet_handler(fn);
 }
 
 // ============================================================
@@ -139,30 +134,10 @@ void terminal_set_mouse_handler(TermMouseHandlerFn fn) {
 // ============================================================
 char terminal_getchar(void) {
     while (1) {
-        uint8_t st;
-        __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
-
-        if (!(st & 1)) {
-            __asm__ __volatile__("nop");
-            continue;
-        }
-
-        if (st & (1 << 5)) {
-            // Données souris : consommer le paquet
-            if (mouse_poll() && s_mouse_handler) {
-                s_mouse_handler();
-            }
-            continue;
-        }
-
-        // Données clavier
         char c = input_dispatch_char();
         if (c == 0) continue;
-
-        // Flèches haut/bas → scroll, pas de caractère retourné
-        if (c == 16) { terminal_scroll_up();   return 0; }
-        if (c == 14) { terminal_scroll_down();  return 0; }
-
+        if (c == 16) { terminal_scroll_up();  return 0; }
+        if (c == 14) { terminal_scroll_down(); return 0; }
         return c;
     }
 }
@@ -202,9 +177,7 @@ static void print_prompt(void) {
 // API publique — Boucle shell
 // ============================================================
 
-// Redraw callback : installé par desktop.c via terminal_set_mouse_handler,
-// mais on a aussi besoin de redraw après chaque putchar. Desktop installe
-// une fonction de redraw que le terminal appelle après écriture.
+// Redraw : desktop.c installe un callback via terminal_set_redraw_fn().
 static void (*s_redraw_fn)(void) = 0;
 
 void terminal_set_redraw_fn(void (*fn)(void)) {

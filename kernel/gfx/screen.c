@@ -267,6 +267,51 @@ void screen_render(void) {
 // PRIMITIVES GÉOMÉTRIQUES (coordonnées pixels)
 // ============================================================
 
+void gfx_blend_pixel(int x, int y, uint32_t src, uint8_t alpha) {
+    if (!vesa_active()) return;
+    if (alpha == 0) return;
+    uint32_t sw = vesa_width(), sh = vesa_height();
+    if ((uint32_t)x >= sw || (uint32_t)y >= sh) return;
+    if (alpha >= 255) {
+        vesa_put_pixel(x, y, src);
+        return;
+    }
+    uint32_t dst = vesa_get_pixel(x, y);
+    uint32_t sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
+    uint32_t dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
+    uint32_t inv = 255u - (uint32_t)alpha;
+    uint32_t r = (sr * alpha + dr * inv) / 255u;
+    uint32_t g = (sg * alpha + dg * inv) / 255u;
+    uint32_t b = (sb * alpha + db * inv) / 255u;
+    vesa_put_pixel(x, y, (r << 16) | (g << 8) | b);
+}
+
+void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
+    if (!vesa_active() || alpha == 0) return;
+    int x2 = x + w, y2 = y + h;
+    uint32_t sw = vesa_width(), sh = vesa_height();
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if ((uint32_t)x2 > sw) x2 = (int)sw;
+    if ((uint32_t)y2 > sh) y2 = (int)sh;
+    for (int py = y; py < y2; py++)
+        for (int px = x; px < x2; px++)
+            gfx_blend_pixel(px, py, color, alpha);
+}
+
+void gfx_stroke_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
+    if (!vesa_active() || w <= 0 || h <= 0 || alpha == 0) return;
+    int x2 = x + w - 1, y2 = y + h - 1;
+    for (int xi = x; xi <= x2; xi++) {
+        gfx_blend_pixel(xi, y, color, alpha);
+        if (h > 1) gfx_blend_pixel(xi, y2, color, alpha);
+    }
+    for (int yi = y + 1; yi < y2; yi++) {
+        gfx_blend_pixel(x, yi, color, alpha);
+        gfx_blend_pixel(x2, yi, color, alpha);
+    }
+}
+
 // Remplir un rectangle plein
 void gfx_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if (!vesa_active()) return;

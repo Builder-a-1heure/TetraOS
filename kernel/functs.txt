@@ -1,6 +1,6 @@
 ================================================================================
-  TetraOS v2.0 — INDEX DES FONCTIONS
-  Généré manuellement — à mettre à jour à chaque ajout/suppression de fonction
+  TetraOS — INDEX DES FONCTIONS (référence noyau)
+  Généré / maintenu manuellement — à mettre à jour à chaque évolution notable
 ================================================================================
 
 Structure du projet :
@@ -10,7 +10,8 @@ Structure du projet :
   mem/         Gestion mémoire : allocateur boot, page frame allocator
   fs/          Système de fichiers RAY64
   ui/          Interface graphique : bureau, fenêtres, sessions/login
-  shell/       Point d'entrée kernel, shell texte, interpréteur TEX
+  shell/       main.c, shell.c (parse/dispatch), terminal.c (fenêtre + shell interactif),
+               editor.c, tex.c
   lib/         Utilitaires C, I/O bas niveau, types globaux
 
 ================================================================================
@@ -23,12 +24,16 @@ Structure du projet :
   ! vesa_invalidate_cell()) pour que vesa_draw_glyph() redessine correctement
   ! les glyphes concernés au prochain rendu.
 
-  Séquence correcte pour un bloc de dessin UI :
+  gfx_blend_pixel / gfx_*_blend : lisent le pixel existant (vesa_get_pixel)
+  puis écrivent un mélange alpha ; même règle si la zone recouvrait du texte
+  scrollback / glyphes — invalider si besoin après un bloc UI.
+
+  Séquence type bureau / fenêtre (texte via glyphes + fond gfx) :
       screen_begin_ui();
-          gfx_fill_rect(...)        // efface une zone
-          vesa_invalidate_all();    // invalide les cellules de cette zone
-          gfx_draw_text(...)        // redessine le texte
-      screen_end_ui();              // flush vers le framebuffer
+          gfx_gradient_v / gfx_fill_rect ...
+          vesa_invalidate_all();     // après gros gfx sur zone texte possible
+          gfx_draw_text / vesa_draw_glyph ...
+      screen_end_ui();
 
 ================================================================================
   drivers/vesa.c — Pilote framebuffer VESA
@@ -96,12 +101,16 @@ int  mouse_poll(void)
   Accumule les 3 octets d'un paquet PS/2. Retourne 1 quand un paquet complet
   est décodé et g_mouse mis à jour, 0 sinon.
   Resynchronisation via bit3 du premier octet (toujours 1 dans un paquet souris).
+  Le commentaire dans mouse.c précise que le bit 5 du status (souris) n'est
+  pas fiable sur toutes les VM — le routage correct des octets 2 et 3 est
+  assuré côté input_dispatch_char() via mouse_in_packet().
   Appel : while (mouse_poll()) mouse_moved = 1;
 
 int  mouse_in_packet(void)
   Retourne 1 si on est en cours de réception d'un paquet (octets 2 ou 3).
-  Utilisé par input_dispatch_char() pour éviter de lire un scancode clavier
-  pendant la réception d'un paquet souris.
+  Utilisé en tête de input_dispatch_char() : tant qu'un paquet est incomplet,
+  tout octet en file doit aller à mouse_poll(), même si le bit 5 du port 0x64
+  est à 0 (QEMU). Évite de traiter un octet souris comme scancode clavier.
 
 void mouse_draw_cursor(void)
   Sauvegarde les pixels sous le curseur dans g_cursor_bg[], puis dessine
@@ -127,11 +136,25 @@ void mouse_reset_cursor(void)
   drivers/input.c — Clavier PS/2 + dispatcher 8042
 ================================================================================
 
+void input_set_mouse_packet_handler(void (*fn)(void))
+  Enregistre un callback appelé lorsqu'un paquet souris complet est reçu
+  (après mouse_poll() qui retourne 1). Si fn est NULL, comportement par défaut :
+  mouse_erase_cursor() + mouse_draw_cursor().
+  Utilisé par terminal_set_mouse_handler() (shell/terminal.c) pour brancher
+  on_term_mouse() du bureau pendant terminal_run() — drag de fenêtre, hover
+  titlebar, sans dupliquer la lecture du port 0x60.
+
 char input_dispatch_char(void)
-  DISPATCHER CENTRALISÉ. Lit le status register 0x64 :
-    bit5=1 → appelle mouse_poll() + redraw curseur, retourne 0
-    bit5=0 → lit le scancode et le décode, retourne le char (ou 0 si modificateur)
-  C'est la brique de base pour tout polling clavier+souris simultané.
+  DISPATCHER CENTRALISÉ. Boucle interne sur le status 0x64 (bit0 = donnée prête) :
+    1) Si mouse_in_packet() : mouse_poll() ; si paquet complet → handler
+       souris (voir input_set_mouse_packet_handler) ou redraw curseur par défaut ;
+       retourne 0.
+    2) Sinon si bit5=1 (donnée souris) : idem mouse_poll() + handler/curseur ;
+       retourne 0.
+    3) Sinon : lit 0x60 comme scancode clavier, gère Shift/Ctrl, flèches,
+       retourne le caractère ou 0 (modificateur / relâchement).
+  C'est la brique de base pour clavier + souris sans double consommation
+  d'octets sur le port 0x60.
   Appel : char c = input_dispatch_char(); if (c) { ... }
 
 char keyboard_get_char(void)
@@ -190,11 +213,13 @@ void screen_init(void)
 --- Cycle de rendu UI ---
 
 void screen_begin_ui(void)
-  Commence un bloc de dessin UI : suspend les flushes automatiques.
-  Tout gfx_*() / vesa_draw_glyph() appelé entre begin et end est accumulé.
+  g_ui_drawing = 1 : screen_render() ne flushe plus tout de suite (marque seulement
+  g_screen_dirty si appelé). Les gfx_* écrivent directement dans le framebuffer.
 
 void screen_end_ui(void)
-  Termine le bloc : flush le framebuffer si des changements sont en attente.
+  g_ui_drawing = 0 ; si g_screen_dirty alors render_vesa()/render_vga() (réaffiche
+  le scrollback par-dessus). Le bureau dessine en gfx sans passer par screen_render,
+  donc souvent pas de flush ici — le contenu graphique reste tel quel sur le FB.
 
 void screen_exit_ui(void)
   Quitte l'UI graphique pour revenir au terminal texte : vesa_fill(BG),
@@ -271,6 +296,16 @@ void gfx_draw_text(int x, int y, const char* str, uint32_t fg, uint32_t bg)
 
 void gfx_draw_text_centered(int x, int y, int w, const char* str, uint32_t fg, uint32_t bg)
   Texte centré horizontalement dans une zone de largeur w.
+
+void gfx_blend_pixel(int x, int y, uint32_t color, uint8_t alpha)
+  Mélange color (0x00RRGGBB) avec le pixel déjà affiché ; alpha 0–255.
+  Utilise vesa_get_pixel + vesa_put_pixel. Mode VESA uniquement.
+
+void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha)
+  Rectangle plein avec le même mélange alpha pixel par pixel.
+
+void gfx_stroke_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha)
+  Contour d'un rectangle (1 px) en mélange alpha (coins dessinés une fois).
 
 void draw_box(int x1, int y1, int x2, int y2)
   Boîte en coordonnées caractères (VGA) ou pixels (VESA).
@@ -367,7 +402,7 @@ void session_init(void)
 
 void session_load(void)
 void session_save(void)
-  Charge/sauvegarde les sessions depuis/vers le fichier "sessions" dans le FS.
+  Charge/sauvegarde les sessions depuis/vers le fichier "sessions.dat" dans le FS.
 
 int  session_create(const char* name, const char* password, uint8_t is_admin)
   Crée une nouvelle session. Retourne l'index ou -1 si erreur (nom existant,
@@ -426,56 +461,92 @@ int  session_verify_password(const char* password, const char* hash)
 ================================================================================
 
 void desktop_run(void)
-  Boucle principale du bureau graphique. Gère :
-    - Dessin du fond + icônes
-    - Polling souris + curseur
-    - Hover/clic sur les icônes
-    - Ouverture/fermeture/drag de la fenêtre terminal
-    - Appel à run_terminal_shell() quand le terminal est ouvert
+  Boucle principale du bureau (tant que logged_in). Gère :
+    - Fond dégradé + barre des tâches + icône Terminal
+    - Polling souris (mouse_poll) + curseur hors fenêtre terminal bloquante
+    - Clic sur l'icône → open_terminal() qui appelle terminal_run() et bloque
+      jusqu'à fermeture [X] ou logout
+  Important : pendant terminal_run(), cette boucle ne s'exécute pas ; le drag
+  de fenêtre et le hover titlebar passent par input_dispatch_char → callback
+  souris (voir terminal_set_mouse_handler / on_term_mouse).
   Retourne quand g_session_manager.logged_in passe à 0 (logout).
-  Appel : desktop_run() dans la boucle principale de kmain().
+  Appel : desktop_run() dans kmain() après session_do_login_flow().
 
-  Fonctions internes (static) — non appelables de l'extérieur :
+  Fonctions internes (static) :
 
-  draw_background()       Dégradé de fond du bureau
-  draw_taskbar()          Barre des tâches (bas d'écran)
-  draw_icon()             Icône sur le bureau
-  draw_window(focused)    Fenêtre terminal (chrome : titlebar, bordure, bouton X)
-  draw_terminal_content() Contenu texte de la fenêtre (lignes du buffer g_term)
-  desktop_redraw_all()    Redraw complet fond + éléments UI + terminal
-  term_redraw_content()   Redraw partiel du contenu texte seulement
+  draw_background()         Dégradé plein écran + vesa_invalidate_all() pour
+                            resynchroniser le dirty tracker avec le framebuffer
+                            (évite texte fantôme après gfx_* sur le bureau).
+  draw_taskbar()            Barre du bas (session, titre)
+  draw_icon()               Icône Terminal ; libellé sous l'icône avec fond
+                            échantillonné via vesa_get_pixel (cohérent avec le fond)
+  draw_window(focused)      Chrome fenêtre : ombre décalée, fond WIN_BG, bordures
+                            « vitrées » (gfx_stroke_rect_blend + highlight),
+                            paint_titlebar_chrome(), séparateur titlebar/contenu
+  paint_titlebar_chrome(tb) Remplit la barre de titre + texte « Terminal » + bouton [X]
+  draw_terminal_content(full_sync)
+                            Rendu du buffer g_term dans la zone texte. full_sync=1
+                            après redraw complet de fenêtre (vesa_invalidate_all) ;
+                            full_sync=0 : incrémental (cache VESA) + invalidation
+                            cellule curseur (gfx_fill_rect curseur hors dirty glyph).
+  desktop_redraw_all()      Fond + taskbar + icône OU fenêtre + contenu terminal
+  term_redraw_content()     Redraw partiel : draw_terminal_content(0) seulement
+  open_terminal()           g_win_open, dimensions, terminal_init, callbacks redraw/
+                            souris, desktop_redraw_all, terminal_run() bloquant
+  close_terminal()          Ferme la fenêtre, retire hooks
+  on_term_redraw()          Callback → term_redraw_content()
+  on_term_mouse()           Début drag (s_term_prev_left + hit_window_drag_region),
+                            déplacement fenêtre, clamp écran, ou repaint titlebar
+  hit_titlebar / hit_close / hit_window_drag_region
+                            Hit-tests : drag depuis titlebar (hors zone [X]) ou
+                            bande WIN_DRAG_BORDER sur les côtés et le bas (hors
+                            zone texte centrale)
 
-  term_init()             Initialise le buffer g_term (TERM_LINES × TERM_COLS)
-  term_putchar(c)         Écrit un char dans g_term (newline, backspace, scroll)
-  term_puts(s)            Écrit une chaîne dans g_term
-  term_getchar()          Lit un char depuis le clavier (via input_dispatch_char)
-                          Gère aussi le drag de fenêtre et le scroll terminal
+  API shell/terminal.h (buffer g_term[], utilisé par desktop pour le rendu) :
 
-  run_terminal_shell()    Shell interactif dans la fenêtre. Installe g_print_hook
-                          = term_putchar pour rediriger print_*() vers g_term.
-                          Boucle saisie→dispatch_*() jusqu'au logout.
+  void terminal_init(uint32_t fg, uint32_t bg)
+  void terminal_putchar(char c)   void terminal_puts(const char* s)
+  char terminal_getchar(void)     Boucle sur input_dispatch_char() ; scroll flèches
+  void terminal_run(void)         Installe g_print_hook = terminal_putchar, bannière,
+                                  boucle prompt → shell_parse / shell_dispatch / cmd_sl
+  void terminal_set_redraw_fn(void (*fn)(void))
+  void terminal_set_mouse_handler(TermMouseHandlerFn fn)  → input_set_mouse_packet_handler
+  void terminal_scroll_up(void)   void terminal_scroll_down(void)
+
+  Variables globales (terminal.c) : g_term[][], g_term_row, g_term_col, g_term_view,
+    g_term_cols_vis, g_term_rows_vis, g_term_fg, g_term_bg
 
 ================================================================================
-  shell/main.c — Point d'entrée kernel + shell texte
+  shell/main.c — Point d'entrée kernel
 ================================================================================
+
+void start(void)
+  Point d'entrée brut (section .text.start) : pile, segments, BSS, appelle kmain.
 
 void kmain(void)
   Séquence de boot :
     screen_init() → clear_screen() → ata_init() → fs_init() →
     vesa_boot_anim() → session_init() → session_load() → mouse_init() →
-    boucle : session_do_login_flow() → desktop_run()
+    boucle infinie : session_do_login_flow() → desktop_run() (bureau graphique).
 
-void tetra_shell(void)
-  Shell texte brut (mode VGA ou fallback). Parse les commandes namespaced.
-  Utilisé avant l'init complète ou en mode dégradé.
+void read_line(char* buffer, int max_len)
+  Saisie ligne en mode texte (keyboard_get_char + echo scrollback). Utilisé par
+  shell.c / contextes non fenêtrés.
 
-int  parse_namespaced(const char* input,
-                      char* mod_out, int mod_max,
-                      char* cmd_out, int cmd_max,
-                      char* args_out, int args_max)
+================================================================================
+  shell/shell.c — Parse / dispatch namespaced
+================================================================================
+
+int  shell_parse(const char* input,
+                 char* mod_out, int mod_max,
+                 char* cmd_out, int cmd_max,
+                 char* args_out, int args_max)
   Parse une commande "module.commande args" en trois parties.
-  Retourne 1 si le format est valide, 0 sinon.
-  Appel : parse_namespaced(s, mod, 32, cmd, 64, args, 192)
+  Retourne 1 si le format "mod.cmd" est valide, 0 sinon.
+  Déclaré dans shell.h ; utilisé par terminal_run() et le shell texte.
+
+void shell_dispatch(const char* mod, const char* cmd, const char* args)
+  Dispatche vers dispatch_ray64 / dispatch_session / dispatch_sys / dispatch_tex.
 
 void dispatch_ray64(const char* cmd, const char* args)
   Traite les commandes du namespace "ray64" (gestion FS : ls, cd, mkdir, etc.)
@@ -493,21 +564,21 @@ void cmd_adduser(void)
 void cmd_deluser(void)
 void cmd_users(void)
 void cmd_whoami(void)
-  Commandes utilisateur accessibles depuis tetra_shell().
+  Commandes « session » utilisables depuis le dispatch (ex. terminal).
 
 void cmd_sl(void)
   Easter egg : animation de train ASCII.
 
-void windowed_write(const char* filename)
-  Éditeur de texte fenêtré (mode VESA). Ouvre un fichier du FS,
-  permet l'édition et sauvegarde avec Ctrl+S.
+================================================================================
+  shell/editor.c — Éditeur texte (mode graphique VESA)
+================================================================================
 
-void read_line(char* buffer, int max_len)
-  Saisie d'une ligne texte dans le terminal (bloquant).
+void editor_open(const char* filename)
+  Boucle édition fenêtrée : lecture/sauvegarde fichier FS, Ctrl+S, etc.
 
 void draw_editor_window(const char* filename, const char* content,
                         int cursor_pos, int scroll_offset)
-  Rendu graphique de l'éditeur texte fenêtré. Appelé par windowed_write().
+  Une passe de rendu de la fenêtre éditeur.
 
 ================================================================================
   shell/tex.c — Interpréteur de scripts TEX
@@ -582,18 +653,19 @@ void mem_boot_init(uintptr_t phys_base, size_t phys_size)
 ================================================================================
 
   Définies dans drivers/vesa.h :
-    COLOR_BG         0x00000000  Fond noir terminal
-    COLOR_FG         0x00CCCCCC  Texte gris clair
+    COLOR_BG         0x00000000  Fond noir
+    COLOR_FG         0x00AAAAAA  Texte gris clair (scrollback / console)
     COLOR_FG_BRIGHT  0x00FFFFFF  Texte blanc vif
-    COLOR_SCROLL_BG  0x00222244  Fond bandeau scroll
-    COLOR_SCROLL_FG  0x00AAAAFF  Texte bandeau scroll
-    FONT_W  8   Largeur d'un glyphe en pixels
-    FONT_H  16  Hauteur d'un glyphe en pixels
+    COLOR_SCROLL_BG  0x00AAAAAA  Fond bandeau « scroll » (render_vesa)
+    COLOR_SCROLL_FG  0x00000000  Texte bandeau scroll
+    FONT_W, FONT_H   dans screen.h (8×16) — utilisés par vesa_text_* et gfx texte
 
-  Définies dans ui/desktop.c (locales) :
-    WIN_BG, WIN_TITLEBAR, WIN_TITLE_ACT, WIN_BORDER, WIN_BORDER_ACT
-    WIN_TEXT_FG, WIN_TEXT_BG, WIN_PROMPT
-    DT_BG_TOP, DT_BG_BOT, DT_TASKBAR_BG, DT_ICON_BG, DT_ICON_BORDER, etc.
+  Définies dans ui/desktop.c (macros locales) :
+    WIN_BG, WIN_TITLEBAR, WIN_TITLE_ACT, WIN_BORDER, WIN_BORDER_ACT (icônes / accents)
+    WIN_EDGE_LIGHT, WIN_EDGE_DIM, WIN_SEP_LINE — bordures vitrées fenêtre
+    WIN_INNER, WIN_DRAG_BORDER, WIN_PAD, TITLEBAR_H — géométrie chrome / drag
+    WIN_TEXT_FG, WIN_TEXT_BG, WIN_PROMPT, WIN_CLOSE_*
+    DT_BG_TOP, DT_BG_BOT, DT_TASKBAR_*, DT_ICON_*, DT_* — bureau et barre des tâches
 
   Définies dans ui/session.c (locales) :
     UI_DARK, UI_ACCENT, UI_ACCENT2, UI_WHITE, UI_GRAY, UI_GREEN,

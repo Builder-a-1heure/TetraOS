@@ -138,6 +138,21 @@ extern char input_buffer[512];
 extern int input_index;
 extern int shift_pressed;
 
+static void (*s_mouse_packet_handler)(void) = NULL;
+
+void input_set_mouse_packet_handler(void (*fn)(void)) {
+    s_mouse_packet_handler = fn;
+}
+
+static void on_mouse_packet_complete(void) {
+    if (s_mouse_packet_handler)
+        s_mouse_packet_handler();
+    else {
+        mouse_erase_cursor();
+        mouse_draw_cursor();
+    }
+}
+
 int keyboard_read_scancode() {
     unsigned char status;
     do {
@@ -225,13 +240,18 @@ char input_dispatch_char(void) {
             continue; // buffer vide
         }
 
+        // Paquet souris déjà commencé : les octets 2 et 3 doivent aller à la souris
+        // même si le bit 5 du status est à 0 (QEMU / VirtualBox le signalent mal).
+        if (mouse_in_packet()) {
+            if (mouse_poll())
+                on_mouse_packet_complete();
+            return 0;
+        }
+
         if (st & (1 << 5)) {
-            // ── Donnée souris ──────────────────────────────────
-            if (mouse_poll()) {
-                mouse_erase_cursor();
-                mouse_draw_cursor();
-            }
-            return 0; // pas de caractère clavier
+            if (mouse_poll())
+                on_mouse_packet_complete();
+            return 0;
         }
 
         // ── Donnée clavier ─────────────────────────────────────

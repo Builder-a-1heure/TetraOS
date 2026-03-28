@@ -16,4 +16,8 @@ char get_input_char(void);
 // À appeler en boucle ; bloque jusqu'à un vrai caractère clavier.
 char input_dispatch_char(void);
 
+// Callback optionnel quand un paquet souris complet est reçu (terminal graphique).
+// NULL = comportement par défaut (efface/redessine le curseur).
+void input_set_mouse_packet_handler(void (*fn)(void));
+
 #endif

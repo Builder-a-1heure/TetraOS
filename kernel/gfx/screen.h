@@ -94,6 +94,11 @@ void screen_invalidate(void);
 void gfx_fill_rect(int x, int y, int w, int h, uint32_t color);
 void gfx_draw_rect(int x, int y, int w, int h, uint32_t color);
 
+// Alpha 0–255 sur le canal couleur 0x00RRGGBB (lecture du fond via VESA)
+void gfx_blend_pixel(int x, int y, uint32_t color, uint8_t alpha);
+void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha);
+void gfx_stroke_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha);
+
 // Ligne Bresenham
 void gfx_draw_line(int x0, int y0, int x1, int y1, uint32_t color);
 
