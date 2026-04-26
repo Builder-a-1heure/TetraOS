@@ -10,7 +10,7 @@
 //   - cmd_sl()          : easter egg
 
 #include "shell.h"
-#include "editor.h"
+#include "../apps/textedit.h"
 #include "../gfx/screen.h"
 #include "../drivers/input.h"
 #include "../fs/fs.h"
@@ -193,7 +193,7 @@ void dispatch_ray64(const char* cmd, const char* args) {
             print_string("\n");
             if (fs_add(args) < 0) { print_string("ray64.edit : echec creation\n"); return; }
         }
-        editor_open(args);
+        app_textedit_run(args);
     }
     // ray64.cat <fichier>
     else if (strcmp(cmd, "cat") == 0) {

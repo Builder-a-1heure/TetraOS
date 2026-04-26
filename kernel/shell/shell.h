@@ -36,4 +36,6 @@ void dispatch_tex(const char* cmd, const char* args);
 // Easter egg
 void cmd_sl(void);
 
+void textedit_run(const char* filename);
+
 #endif // SHELL_H

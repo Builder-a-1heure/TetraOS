@@ -10,9 +10,11 @@ Structure du projet :
   mem/         Gestion mémoire : allocateur boot, page frame allocator
   fs/          Système de fichiers RAY64
   ui/          Interface graphique : bureau, fenêtres, sessions/login
+
   shell/       main.c, shell.c (parse/dispatch), terminal.c (fenêtre + shell interactif),
                editor.c, tex.c
   lib/         Utilitaires C, I/O bas niveau, types globaux
+               appcore.c/h : système de widgets (AppWindow, WGT_*)
 
 ================================================================================
   RÈGLES GÉNÉRALES FRAMEBUFFER
@@ -670,6 +672,186 @@ void mem_boot_init(uintptr_t phys_base, size_t phys_size)
   Définies dans ui/session.c (locales) :
     UI_DARK, UI_ACCENT, UI_ACCENT2, UI_WHITE, UI_GRAY, UI_GREEN,
     UI_RED, UI_ADMIN, UI_SELECTED
+
+================================================================================
+  lib/appcore.h + lib/appcore.c — Système de widgets (AppCore)
+================================================================================
+
+AppCore est la couche UI de haut niveau de TetraOS. Elle permet de construire
+des applications graphiques fenêtrées sans toucher directement aux primitives
+gfx_*, vesa_*, mouse_* ou input_dispatch_char().
+
+--- Constantes de palette (modifiables avant app_window_init) ---
+
+  UI_TITLEBAR_H   26 px  — hauteur de la barre de titre
+  UI_WIN_BG       0x00101820  — fond fenêtre
+  UI_WIN_TITLE    0x00001A44  — barre titre inactive
+  UI_WIN_TITLE_ACT 0x00003388 — barre titre active
+  UI_WIN_BORDER_ACT 0x0000AAFF — bordure focus
+  UI_BTN_BG/HOVER/PRESS/BORDER/FG — couleurs bouton
+  UI_INPUT_BG/BORDER/FOCUS/FG/CURSOR — couleurs champ de saisie
+  UI_LABEL_FG     0x00AABBCC
+  UI_CHECK_BOX/CHECK/BORDER — case à cocher
+  UI_PROGRESS_BG/FG/FULL/BDR — barre de progression
+
+--- Types de widgets (WidgetType) ---
+
+  WGT_BUTTON    Bouton cliquable (hover + effet pressé + grisé si disabled)
+  WGT_LABEL     Texte statique
+  WGT_INPUT     Champ de saisie (curseur, insertion, backspace, Tab pour
+                passer au champ suivant, max APP_INPUT_MAXLEN=127 caractères)
+  WGT_CHECKBOX  Case à cocher (toggle au clic)
+  WGT_PROGRESS  Barre de progression 0–100 avec % affiché
+
+--- Types d'événements (EventType) ---
+
+  EVT_CLICK     Bouton relâché. AppEvent.widget_id = index du bouton.
+  EVT_CHANGE    Valeur modifiée. Déclenché par frappe dans WGT_INPUT
+                ou toggle de WGT_CHECKBOX. AppEvent.widget_id = widget concerné.
+  EVT_CLOSE     Bouton [X] de la fenêtre cliqué.
+  EVT_KEY       Touche clavier non-consommée par un input focusé.
+                AppEvent.key = caractère ASCII (ou code spécial : 27=ESC,
+                16=↑, 14=↓, 17=←, 18=→).
+  EVT_NONE      Aucun événement notable ce cycle.
+
+--- Structure AppEvent ---
+
+  typedef struct {
+      EventType   type;
+      int         widget_id;   // -1 si événement global (EVT_CLOSE, EVT_KEY)
+      char        key;         // EVT_KEY : touche reçue
+  } AppEvent;
+
+--- API Fenêtre ---
+
+void app_window_init(AppWindow* win, const char* title,
+                     int x, int y, int w, int h)
+  Initialise la fenêtre. w, h = dimensions zone CLIENT (hors barre de titre).
+  La hauteur totale affichée = h + UI_TITLEBAR_H.
+  À appeler avant tout app_add_*().
+
+void app_window_draw(AppWindow* win)
+  Redessine la fenêtre complète (barre de titre, ombre, bordures, tous widgets).
+  Encapsule screen_begin_ui() / screen_end_ui() et vesa_invalidate_all().
+  Normalement appelé automatiquement par app_poll/app_run quand win->dirty=1.
+
+--- API Ajout de widgets ---
+  Toutes ces fonctions retournent un widget_id (index ≥ 0), ou -1 si la limite
+  APP_MAX_WIDGETS (64) est atteinte. x, y sont RELATIFS à la zone client.
+
+int app_add_button(AppWindow* win, int x, int y, int w, int h,
+                   const char* label)
+  Bouton avec texte centré. Génère EVT_CLICK au relâchement du clic.
+
+int app_add_label(AppWindow* win, int x, int y, const char* text)
+  Texte statique. Largeur auto (strlen*8 px). Modifiable via app_set_label().
+
+int app_add_input(AppWindow* win, int x, int y, int w, int h,
+                  const char* placeholder)
+  Champ de saisie. placeholder = texte grisé affiché à vide.
+  Génère EVT_CHANGE à chaque frappe.
+
+int app_add_checkbox(AppWindow* win, int x, int y,
+                     const char* label, int checked)
+  Case à cocher. checked=1 : cochée à l'init. Génère EVT_CHANGE au toggle.
+
+int app_add_progress(AppWindow* win, int x, int y, int w, int h, int value)
+  Barre de progression. value : 0–100. Mise à jour via app_set_progress().
+
+--- API Manipulation ---
+
+void app_set_label(AppWindow* win, int widget_id, const char* text)
+  Modifie le texte d'un WGT_LABEL ou WGT_BUTTON. Marque dirty.
+
+const char* app_get_input(AppWindow* win, int widget_id)
+  Retourne le contenu actuel d'un WGT_INPUT (lecture seule).
+
+void app_set_input(AppWindow* win, int widget_id, const char* text)
+  Définit le contenu d'un WGT_INPUT et place le curseur en fin. Marque dirty.
+
+int app_get_checked(AppWindow* win, int widget_id)
+  Retourne l'état d'un WGT_CHECKBOX (0 ou 1).
+
+void app_set_checked(AppWindow* win, int widget_id, int checked)
+  Définit l'état d'un WGT_CHECKBOX. Marque dirty.
+
+void app_set_progress(AppWindow* win, int widget_id, int value)
+  Définit la valeur (0–100) d'un WGT_PROGRESS. Marque dirty.
+
+void app_set_enabled(AppWindow* win, int widget_id, int enabled)
+  Active (1) ou grise (0) un widget. Marque dirty.
+
+void app_invalidate(AppWindow* win)
+  Force un redraw complet au prochain app_poll/app_run.
+
+--- API Boucle événements ---
+
+AppEvent app_run(AppWindow* win)
+  Boucle BLOQUANTE. Attend et retourne le prochain événement notable
+  (EVT_CLICK, EVT_CHANGE, EVT_CLOSE ou EVT_KEY). Gère souris + clavier +
+  redraw automatiquement.
+  Usage type :
+      while (win.open) {
+          AppEvent ev = app_run(&win);
+          if (ev.type == EVT_CLOSE)                        break;
+          if (ev.type == EVT_CLICK && ev.widget_id == btn) { ... }
+          if (ev.type == EVT_CHANGE && ev.widget_id == inp) {
+              const char* val = app_get_input(&win, inp);
+          }
+      }
+
+AppEvent app_poll(AppWindow* win)
+  Version NON-BLOQUANTE d'app_run. Traite un cycle souris/clavier et retourne
+  immédiatement (EVT_NONE si rien de notable).
+  Utile pour intégrer AppCore dans une boucle existante avec d'autres traitements.
+
+--- Comportements automatiques gérés par AppCore ---
+
+  · Drag de fenêtre depuis la barre de titre (clamping aux bords de l'écran)
+  · Bouton [X] → EVT_CLOSE + win->open = 0
+  · Hover visuel sur boutons et checkboxes
+  · Focus input : clic pour focus, Tab pour passer au suivant
+  · mouse_erase_cursor() / mouse_draw_cursor() autour de chaque redraw
+  · vesa_invalidate_all() après chaque primitive gfx dans les widgets
+
+--- Lecture clavier non-bloquante (interne) ---
+
+  AppCore implémente sa propre lecture non-bloquante du port 0x64/0x60
+  (appcore_read_key_nonblock, static) pour ne pas bloquer en attendant
+  une touche. Les données souris arrivant sur le port 0x60 pendant un
+  cycle sans touche sont routées vers mouse_poll() au passage.
+  Cette fonction est interne — ne pas l'appeler directement.
+
+--- Exemple minimal d'application ---
+
+  #include "../lib/appcore.h"
+
+  void my_app(void) {
+      AppWindow win;
+      app_window_init(&win, "Exemple", 100, 80, 320, 200);
+
+      int lbl  = app_add_label   (&win, 20, 20, "Votre nom :");
+      int inp  = app_add_input   (&win, 20, 44, 280, 28, "Saisir...");
+      int chk  = app_add_checkbox(&win, 20, 90, "Option", 0);
+      int bar  = app_add_progress(&win, 20, 120, 280, 18, 0);
+      int ok   = app_add_button  (&win, 200, 158, 80, 28, "OK");
+      int ann  = app_add_button  (&win, 290, 158, 80, 28, "Annuler");
+
+      while (win.open) {
+          AppEvent ev = app_run(&win);
+          if (ev.type == EVT_CLOSE || ev.widget_id == ann) break;
+          if (ev.type == EVT_CHANGE && ev.widget_id == inp) {
+              int len = 0;
+              const char* s = app_get_input(&win, inp);
+              while (s[len]) len++;
+              app_set_progress(&win, bar, len * 10 > 100 ? 100 : len * 10);
+          }
+          if (ev.type == EVT_CLICK && ev.widget_id == ok) {
+              // traiter app_get_input(&win, inp), app_get_checked(&win, chk)
+              break;
+          }
+      }
+  }
 
 ================================================================================
   FIN DE L'INDEX
