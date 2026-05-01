@@ -14,6 +14,12 @@ char get_input_char(void);
 // - Si donnée clavier → décode et retourne le caractère (>0)
 // - Si rien           → retourne 0
 // À appeler en boucle ; bloque jusqu'à un vrai caractère clavier.
+// NON-BLOQUANT : retourne 0 immédiatement si aucune donnée disponible.
+// À utiliser dans les boucles UI qui lisent aussi la souris.
+char input_poll_char(void);
+
+// BLOQUANT : boucle jusqu'à recevoir une donnée clavier ou souris.
+// Retourne 0 pour les events souris, le caractère sinon.
 char input_dispatch_char(void);
 
 // Callback optionnel quand un paquet souris complet est reçu (terminal graphique).

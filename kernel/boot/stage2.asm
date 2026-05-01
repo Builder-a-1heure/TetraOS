@@ -345,7 +345,7 @@ init_pm:
     hlt
 
 LBA_START      equ 3
-KERNEL_SECTORS equ 200
+KERNEL_SECTORS equ 500
 CHUNK          equ 64
 
 times 1024 - ($ - $$) db 0

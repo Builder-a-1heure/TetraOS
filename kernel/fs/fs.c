@@ -25,6 +25,7 @@ int fs_write_file(const char* name, const uint8_t* data, uint32_t size);
 static void ray64_get_meta(FSNode* node, RAY64NodeMeta* meta);
 static void ray64_set_meta(FSNode* node, const RAY64NodeMeta* meta);
 static int  ray64_flush_node(uint32_t node_idx);
+static int  ray64_flush_header(void);
 
 // ============================================================================
 // MOTEUR ACL RAY64
@@ -39,6 +40,10 @@ int fs_acl_check(uint32_t node_idx, AclOp op) {
     if (node_idx >= g_fs.node_count) return 0;
     FSNode* node = &g_fs.nodes[node_idx];
     if (node->magic != FS_MAGIC) return 0;
+
+    // Root context système : bypass total de toutes les ACL.
+    // Utilisé pendant session_create / session_create_home_dir / fs_format.
+    if (session_is_root()) return 1;
 
     RAY64NodeMeta meta;
     ray64_get_meta(node, &meta);
@@ -265,6 +270,15 @@ int fs_flush(void) {
 }
 
 // Flush single node metadata
+// Flush only the FSTable header sector (sector 0 of the table).
+// Must be called whenever node_count changes so the value is persisted.
+static int ray64_flush_header(void) {
+    uint8_t sector[512];
+    memset(sector, 0, 512);
+    memcpy(sector, (uint8_t*)&g_fs, 512);
+    return write_sectors(FS_TABLE_LBA, sector, 1);
+}
+
 static int ray64_flush_node(uint32_t node_idx) {
     if (node_idx >= g_fs.node_count) return -1;
     
@@ -353,7 +367,11 @@ void fs_format(void) {
     }
     
     print_string("RAY64: Format completed\n");
-    
+
+    // Root context pour la création des fichiers systèmes initiaux
+    // (pas de session connectée à ce stade)
+    session_root_enter();
+
     // Créer le fichier tex.txt avec la documentation TEX
     print_string("RAY64: Creating tex.txt documentation...\n");
     
@@ -430,6 +448,7 @@ void fs_format(void) {
     }
     
     g_cwd = saved_cwd; // Restaurer le répertoire courant
+    session_root_exit();
 }
 
 // Initialize RAY64 filesystem
@@ -587,8 +606,14 @@ int fs_read_file(const char* name, uint8_t* out, uint32_t max_len) {
 int fs_write_file(const char* name, const uint8_t* data, uint32_t size) {
     int idx = fs_find_in_dir(g_cwd, name);
     if (idx < 0) {
-        print_string("RAY64: File not found\n");
-        return -1;
+        // Le fichier n'existe pas : le créer automatiquement
+        idx = ray64_create_node(name, 0);
+        if (idx < 0) {
+            print_string("RAY64: Failed to create file '");
+            print_string(name);
+            print_string("'\n");
+            return -1;
+        }
     }
 
     // ACL : vérifier le droit d'écriture
@@ -668,6 +693,11 @@ static int ray64_create_node(const char* name, uint8_t is_dir) {
     }
     
     uint32_t new_idx = g_fs.node_count++;
+    // Persister immédiatement le nouveau node_count dans le secteur entête.
+    // ray64_flush_node n'écrit pas toujours le secteur 0 (qui contient node_count)
+    // selon la position du nœud — d'où la perte des fichiers après redémarrage.
+    ray64_flush_header();
+
     FSNode* new_node = &g_fs.nodes[new_idx];
     memset(new_node, 0, sizeof(FSNode));
     

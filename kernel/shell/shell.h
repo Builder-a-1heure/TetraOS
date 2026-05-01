@@ -1,7 +1,3 @@
-#ifndef SHELL_H
-#define SHELL_H
-
-// ============================================================
 // shell.h — Shell namespaced TetraOS
 //
 // Parse et dispatche les commandes "module.commande [args]".
@@ -14,7 +10,9 @@
 //                            args, sizeof(args))) {
 //       shell_dispatch(mod, cmd, args);
 //   }
-// ============================================================
+
+#ifndef SHELL_H
+#define SHELL_H
 
 // Parse "module.commande args" → mod, cmd, args séparés.
 // Retourne 1 si le format "mod.cmd" est respecté, 0 sinon.
@@ -28,14 +26,12 @@ int shell_parse(const char* input,
 void shell_dispatch(const char* mod, const char* cmd, const char* args);
 
 // Dispatchers individuels (accessibles pour extensions futures)
-void dispatch_ray64(const char* cmd, const char* args);
+void dispatch_ray64  (const char* cmd, const char* args);
 void dispatch_session(const char* cmd, const char* args);
-void dispatch_sys(const char* cmd, const char* args);
-void dispatch_tex(const char* cmd, const char* args);
+void dispatch_sys    (const char* cmd, const char* args);
+void dispatch_tex    (const char* cmd, const char* args);
 
 // Easter egg
 void cmd_sl(void);
-
-void textedit_run(const char* filename);
 
 #endif // SHELL_H

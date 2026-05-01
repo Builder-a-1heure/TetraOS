@@ -32,6 +32,7 @@
 #include "../gfx/screen.h"
 #include "../drivers/vesa.h"
 #include "../drivers/mouse.h"
+#include "../apps/app.h"
 #include <stdint.h>
 
 // Globaux de input.c — partagés avec appcore.c
@@ -238,56 +239,6 @@ static void te_load(const char* filename) {
     te_update_cursor_pos();
 }
 
-// ============================================================
-// Lecture clavier non-bloquante
-// Appelée AVANT app_tick pour consommer l'octet en premier.
-// Renvoie 0 si rien ou si c'était un paquet souris.
-// ============================================================
-static char te_read_key_nb(void) {
-    uint8_t st;
-    __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
-    if (!(st & 1)) return 0;
-
-    if (mouse_in_packet() || (st & (1 << 5))) {
-        if (mouse_poll()) {
-            mouse_erase_cursor();
-            mouse_draw_cursor();
-        }
-        return 0;
-    }
-
-    uint8_t sc;
-    __asm__ __volatile__("inb %1, %0" : "=a"(sc) : "Nd"((uint16_t)0x60));
-
-    if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; return 0; }
-    if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; return 0; }
-    if (sc == 0x1D) { ctrl_pressed = 1;  return 0; }
-    if (sc == 0x9D) { ctrl_pressed = 0;  return 0; }
-    if (sc & 0x80)  return 0;
-
-    if (sc == 0x01) return 27;
-    if (sc == 0x0E) return '\b';
-    if (sc == 0x1C) return '\n';
-    if (sc == 0x48) return 16;   // flèche haut
-    if (sc == 0x50) return 14;   // flèche bas
-    if (sc == 0x4B) return 17;   // flèche gauche
-    if (sc == 0x4D) return 18;   // flèche droite
-
-    if (sc < 128) {
-        char c = shift_pressed ? (char)keyboard_map_shift[sc]
-                               : (char)keyboard_map[sc];
-        if (ctrl_pressed) {
-            ctrl_pressed = 0;
-            if (c == 's' || c == 'S') return 19;  // Ctrl+S  → code 19
-            if (c == 'n' || c == 'N') return 29;  // Ctrl+N  → code 29 (dédié, jamais produit ailleurs)
-            if (c >= 'a' && c <= 'z') return c - 'a' + 1;
-            if (c >= 'A' && c <= 'Z') return c - 'A' + 1;
-            return 0;
-        }
-        return c;
-    }
-    return 0;
-}
 
 // ============================================================
 // Rendu du contenu texte (dessin direct dans le framebuffer)
@@ -566,10 +517,9 @@ static int te_ask_filename(char* filename_out) {
     int done   = 0;
 
     while (!done) {
-        // Lire clavier AVANT app_tick (même port 0x64)
-        char c = te_read_key_nb();
-
         app_tick();
+        // Récupère la touche lue par app_tick — pas de double lecture du port
+        char c = app_tick_get_key();
 
         // Gestion saisie texte dans la boîte de dialogue
         if (c != 0) {
@@ -661,11 +611,11 @@ static void te_editor_loop(void) {
     int running = 1;
 
     while (running) {
-        // 1. Clavier AVANT app_tick
-        char c = te_read_key_nb();
-
-        // 2. AppCore gère souris / drag / hover / redraw chrome
+        // 1. AppCore gère souris / drag / hover / redraw chrome + lit le clavier
         app_tick();
+
+        // 2. Récupère la touche lue par app_tick — une seule lecture du port
+        char c = app_tick_get_key();
 
         // 3. Si AppCore a redessiné le chrome ce tick (drag, focus, hover),
         //    notre texte est écrasé → forcer le repaint.

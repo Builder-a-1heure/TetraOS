@@ -148,6 +148,29 @@ void vesa_invalidate_all(void) {
     dirty_reset();
 }
 
+// Invalide les cellules du dirty buffer couvertes par le rectangle pixel (x,y,w,h).
+// À appeler après tout write direct dans le framebuffer (gfx_fill_rect, curseur…)
+// pour que le prochain vesa_draw_glyph force le redraw des glyphes concernés.
+void vesa_invalidate_rect(int x, int y, int w, int h) {
+    if (!g_dirty_init) dirty_reset();
+    if (w <= 0 || h <= 0) return;
+    int col0 = x / FONT_W;
+    int row0 = y / FONT_H;
+    int col1 = (x + w - 1) / FONT_W;
+    int row1 = (y + h - 1) / FONT_H;
+    if (col0 < 0) col0 = 0;
+    if (row0 < 0) row0 = 0;
+    if (col1 >= DIRTY_COLS) col1 = DIRTY_COLS - 1;
+    if (row1 >= DIRTY_ROWS) row1 = DIRTY_ROWS - 1;
+    for (int r = row0; r <= row1; r++) {
+        for (int c = col0; c <= col1; c++) {
+            g_drawn[r][c].ch    = (char)0xFF;
+            g_drawn[r][c].fg_b0 = 0xFF; g_drawn[r][c].fg_b1 = 0xFF; g_drawn[r][c].fg_b2 = 0xFF;
+            g_drawn[r][c].bg_b0 = 0xFF; g_drawn[r][c].bg_b1 = 0xFF; g_drawn[r][c].bg_b2 = 0xFF;
+        }
+    }
+}
+
 void vesa_clear_glyph(int col, int row, uint32_t bg) {
     vesa_draw_glyph(col * FONT_W, row * FONT_H, ' ', bg, bg);
 }

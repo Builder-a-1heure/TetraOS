@@ -67,6 +67,10 @@ void vesa_invalidate_cell(int col, int row);
 // Invalide tout le dirty buffer — force un redraw complet au prochain render
 void vesa_invalidate_all(void);
 
+// Invalide les cellules couvertes par un rectangle pixel — à appeler après
+// tout write direct dans le framebuffer (gfx_fill_rect, curseur, etc.)
+void vesa_invalidate_rect(int x, int y, int w, int h);
+
 // Dessiner un glyphe (caractère) à la position pixel (px, py)
 void vesa_draw_glyph(int px, int py, char c, uint32_t fg, uint32_t bg);
 

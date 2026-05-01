@@ -3,6 +3,7 @@
 #include "../gfx/screen.h"
 #include "../drivers/vesa.h"
 #include "../drivers/input.h"
+#include "../drivers/mouse.h"
 #include "../fs/fs.h"
 #include "../lib/utils.h"
 
@@ -13,6 +14,27 @@ SessionManager g_session_manager;
 #define SESSION_FILE "sessions.dat"
 // Nom du répertoire racine des homes utilisateurs
 #define HOME_ROOT_NAME "home"
+
+// ============================================================================
+// CONTEXTE ROOT SYSTÈME
+// Compteur réentrant : plusieurs appels imbriqués session_root_enter/exit
+// s'annulent correctement. Seul le dernier exit désactive le root context.
+// ============================================================================
+static int g_root_depth = 0;
+
+void session_root_enter(void) {
+    g_root_depth++;
+    g_session_manager.root_context = 1;
+}
+
+void session_root_exit(void) {
+    if (g_root_depth > 0) g_root_depth--;
+    if (g_root_depth == 0) g_session_manager.root_context = 0;
+}
+
+int session_is_root(void) {
+    return g_session_manager.root_context ? 1 : 0;
+}
 
 // ============================================================================
 // FONCTIONS D'INITIALISATION
@@ -125,19 +147,23 @@ int session_create_home_dir(int session_index) {
     Session* s = &g_session_manager.sessions[session_index];
     if (!s->is_active) return -1;
 
+    // Root context : toutes les opérations FS ici sont système
+    session_root_enter();
+
     // S'assurer que /home existe
     int home_root = session_get_or_create_home_root();
-    if (home_root < 0) return -1;
+    if (home_root < 0) { session_root_exit(); return -1; }
 
     // ACL de /home : admin seul peut y entrer et lister
     fs_acl_set_node((uint32_t)home_root, ACL_ADMIN_FULL, UID_SYSTEM);
 
-    // Creer /home/<n>
+    // Créer /home/<nom>
     int user_home = fs_mkdir_in_dir((uint32_t)home_root, s->name);
     if (user_home < 0) {
         print_string("ERREUR: Impossible de creer /home/");
         print_string(s->name);
         print_string("\n");
+        session_root_exit();
         return -1;
     }
 
@@ -150,6 +176,8 @@ int session_create_home_dir(int session_index) {
     print_string("Repertoire home cree: /home/");
     print_string(s->name);
     print_string(" [rwxrwx---]\n");
+
+    session_root_exit();
     return user_home;
 }
 
@@ -214,37 +242,34 @@ int session_create(const char* name, const char* password, uint8_t is_admin) {
         print_string("ERREUR: Nombre maximum de sessions atteint\n");
         return -1;
     }
-    
+
     // Vérifier que le nom n'existe pas déjà
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (g_session_manager.sessions[i].is_active &&
             strcmp(g_session_manager.sessions[i].name, name) == 0) {
             print_string("ERREUR: Session existe deja\n");
-            return -1; // Session existe déjà
+            return -1;
         }
     }
-    
+
     // Trouver un slot libre
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_session_manager.sessions[i].is_active) {
             Session* s = &g_session_manager.sessions[i];
-            
+
             strncpy(s->name, name, SESSION_NAME_LEN - 1);
             s->name[SESSION_NAME_LEN - 1] = '\0';
-            
+
             session_hash_password(password, s->password);
-            
+
             s->is_active = 1;
-            s->is_admin = is_admin;
-            s->home_dir_node = 0; // Sera initialisé par session_create_home_dir
-            
-            // Définir les permissions
+            s->is_admin  = is_admin;
+            s->home_dir_node = 0; // sera initialisé par session_create_home_dir
+
+            // Permissions
             if (is_admin) {
                 session_grant_all_permissions(i);
             } else {
-                // Permissions de base pour utilisateur normal
-                // Inclut lecture ET écriture des fichiers de config
-                // de sa propre session (sessions.dat + home config)
                 s->permissions = (1 << PERM_FS_READ)      |
                                  (1 << PERM_FS_WRITE)     |
                                  (1 << PERM_FS_DELETE)    |
@@ -253,19 +278,26 @@ int session_create(const char* name, const char* password, uint8_t is_admin) {
                                  (1 << PERM_CONFIG_READ)  |
                                  (1 << PERM_CONFIG_WRITE);
             }
-            
+
             g_session_manager.session_count++;
-            
-            // Créer le répertoire home /home/<nom>
+
+            // Root context : la création du home est une opération système
+            // (session pas encore loggée → session_get_uid() retournerait
+            // UID_SYSTEM sinon, ce qui bloquerait la création du dossier)
+            session_root_enter();
             session_create_home_dir(i);
-            
-            print_string("Session creee, sauvegarde en cours...\n");
+            // Sauvegarder le fichier de sessions (aussi avec perms root)
             session_save();
-            
+            session_root_exit();
+
+            print_string("Session creee: ");
+            print_string(name);
+            print_string(is_admin ? " [admin]\n" : " [user]\n");
+
             return i;
         }
     }
-    
+
     return -1;
 }
 
@@ -453,7 +485,35 @@ int session_login_menu(void) {
         }
         prev_selected = selected;
 
-        char c = keyboard_get_char();
+        // Attendre clavier OU souris
+        int prev_btn_menu = 0;
+        char c = 0;
+        while (c == 0) {
+            c = input_poll_char();
+
+            // Clic souris sur un bouton utilisateur
+            int cur_btn_menu = g_mouse.btn_left;
+            if (cur_btn_menu && !prev_btn_menu) {
+                for (int i = 0; i < active_count; i++) {
+                    int btn_x = panel_x + 20;
+                    int btn_y_i = panel_y + 46 + i * 56;
+                    if (g_mouse.x >= btn_x && g_mouse.x < btn_x + (panel_w - 40) &&
+                        g_mouse.y >= btn_y_i && g_mouse.y < btn_y_i + 40) {
+                        if (i == selected) {
+                            // Clic sur bouton déjà sélectionné → valider
+                            return active_sessions[selected];
+                        }
+                        selected = i;
+                        c = 1; // forcer un redraw
+                        break;
+                    }
+                }
+                if (c == 0) c = 1; // clic hors bouton → redraw neutre
+            }
+            prev_btn_menu = cur_btn_menu;
+            if (c == 1) break;
+        }
+        if (c == 1) continue; // clic → reboucler pour redraw
 
         if (c == 16 || c == 17 || c == 'h' || c == 'H') {
             if (selected > 0) selected--;
@@ -583,6 +643,8 @@ const char* session_get_current_name(void) {
 }
 
 int session_is_admin(void) {
+    // Root context = super-admin système, bypass total
+    if (g_session_manager.root_context) return 1;
     if (g_session_manager.logged_in && g_session_manager.current_session) {
         return g_session_manager.current_session->is_admin;
     }
@@ -590,10 +652,12 @@ int session_is_admin(void) {
 }
 
 uint16_t session_get_uid(void) {
+    // Root context → UID_ROOT, reconnu par fs_acl_check comme bypass total
+    if (g_session_manager.root_context) return UID_ROOT;
     if (g_session_manager.logged_in && g_session_manager.current_session_index >= 0) {
         return (uint16_t)g_session_manager.current_session_index;
     }
-    return 0xFFFF; // UID_SYSTEM
+    return UID_SYSTEM; // 0xFFFF — personne n'est connecté
 }
 
 int session_get_index_by_name(const char* name) {
@@ -701,43 +765,90 @@ int session_do_login_flow(void) {
         gfx_draw_rect(px2, py2, nw, 28, UI_ACCENT);
         screen_end_ui(); // Flush fond complet
 
-        // Saisie nom — ne redessine que le curseur/texte
+        // ----------------------------------------------------------------
+        // Saisie interactive — 2 champs, sélection au clic ou Tab/Entrée
+        // ----------------------------------------------------------------
         char admin_name[SESSION_NAME_LEN];
-        int ni = 0;
-        while (1) {
-            screen_begin_ui();
-            vesa_invalidate_all(); // forcer le redraw complet des cellules de la zone
-            gfx_fill_rect(nx+1, ny+1, nw-2, 26, 0x00111111);
-            for (int k = 0; k < ni; k++) {
-                char tmp[2]; tmp[0] = admin_name[k]; tmp[1] = '\0';
-                gfx_draw_text(nx + 6 + k*FONT_W, ny + 6, tmp, UI_WHITE, 0x00111111);
-            }
-            gfx_fill_rect(nx + 6 + ni*FONT_W, ny+6, 2, FONT_H-4, UI_ACCENT);
-            screen_end_ui();
-            char c = keyboard_get_char();
-            if (c == '\n' || c == '\r') { admin_name[ni] = '\0'; break; }
-            else if ((c == '\b' || c == 127) && ni > 0) ni--;
-            else if (c >= 32 && c <= 126 && ni < SESSION_NAME_LEN-1)
-                admin_name[ni++] = c;
-        }
-
-        // Saisie mot de passe — idem
         char admin_password[SESSION_PASSWORD_LEN];
-        int pi = 0;
+        int ni = 0, pi = 0;
+        int active_field = 0;       // 0 = nom, 1 = mot de passe
+        int prev_btn = 0;           // anti-rebond bouton souris
+
+        // Redessine un champ (fond + texte + curseur) selon son index et focus
+        #define DRAW_FIELD_SETUP(field_idx) do { \
+            int _fi = (field_idx); \
+            int _fx = nx, _fy = (_fi == 0) ? ny : py2; \
+            int _fw = nw; \
+            int _len = (_fi == 0) ? ni : pi; \
+            uint32_t _bd = (active_field == _fi) ? UI_WHITE : UI_ACCENT; \
+            gfx_fill_rect(_fx, _fy, _fw, 28, 0x00111111); \
+            gfx_draw_rect(_fx, _fy, _fw, 28, _bd); \
+            for (int _k = 0; _k < _len; _k++) { \
+                char _tmp[2]; \
+                _tmp[1] = '\0'; \
+                _tmp[0] = (_fi == 0) ? admin_name[_k] : '*'; \
+                gfx_draw_text(_fx + 6 + _k*FONT_W, _fy + 6, _tmp, UI_WHITE, 0x00111111); \
+            } \
+            if (active_field == _fi) \
+                gfx_fill_rect(_fx + 6 + _len*FONT_W, _fy + 6, 2, FONT_H-4, UI_ACCENT); \
+        } while(0)
+
         while (1) {
+            // --- Dessin des deux champs ---
             screen_begin_ui();
-            vesa_invalidate_all(); // forcer le redraw
-            gfx_fill_rect(px2+1, py2+1, nw-2, 26, 0x00111111);
-            for (int k = 0; k < pi; k++)
-                gfx_draw_text(px2 + 6 + k*FONT_W, py2+6, "*", UI_WHITE, 0x00111111);
-            gfx_fill_rect(px2 + 6 + pi*FONT_W, py2+6, 2, FONT_H-4, UI_ACCENT);
+            vesa_invalidate_all();
+            DRAW_FIELD_SETUP(0);
+            DRAW_FIELD_SETUP(1);
             screen_end_ui();
-            char c = keyboard_get_char();
-            if (c == '\n' || c == '\r') { admin_password[pi] = '\0'; break; }
-            else if ((c == '\b' || c == 127) && pi > 0) pi--;
-            else if (c >= 32 && c <= 126 && pi < SESSION_PASSWORD_LEN-1)
-                admin_password[pi++] = c;
+
+            // --- Attente événement (clavier ou souris) ---
+            char c = 0;
+            while (c == 0) {
+                c = input_poll_char();
+
+                // Détection clic souris (front montant)
+                int cur_btn = g_mouse.btn_left;
+                if (cur_btn && !prev_btn) {
+                    // Clic dans la zone nom ?
+                    if (g_mouse.x >= nx && g_mouse.x < nx + nw &&
+                        g_mouse.y >= ny && g_mouse.y < ny + 28) {
+                        active_field = 0;
+                        c = 1; // forcer un redraw
+                    }
+                    // Clic dans la zone mot de passe ?
+                    else if (g_mouse.x >= nx && g_mouse.x < nx + nw &&
+                             g_mouse.y >= py2 && g_mouse.y < py2 + 28) {
+                        active_field = 1;
+                        c = 1; // forcer un redraw
+                    }
+                }
+                prev_btn = cur_btn;
+                if (c == 1) break; // redraw demandé par clic
+            }
+            if (c == 1) continue; // clic → redessiner et reboucler
+
+            // --- Traitement touche clavier ---
+            if (c == '\t') {
+                active_field = 1 - active_field; // Toggle entre 0 et 1
+            } else if (c == '\n' || c == '\r') {
+                if (active_field == 0 && ni > 0)
+                    active_field = 1; // Entrée sur nom → passer au mdp
+                else if (active_field == 1 && pi > 0) {
+                    admin_name[ni] = '\0';
+                    admin_password[pi] = '\0';
+                    break; // Validation finale
+                }
+            } else if (c == '\b' || c == 127) {
+                if (active_field == 0 && ni > 0) ni--;
+                else if (active_field == 1 && pi > 0) pi--;
+            } else if (c >= 32 && c <= 126) {
+                if (active_field == 0 && ni < SESSION_NAME_LEN - 1)
+                    admin_name[ni++] = c;
+                else if (active_field == 1 && pi < SESSION_PASSWORD_LEN - 1)
+                    admin_password[pi++] = c;
+            }
         }
+        #undef DRAW_FIELD_SETUP
 
         int result = session_create(admin_name, admin_password, 1);
         if (result < 0) {
@@ -835,20 +946,43 @@ int session_do_login_flow(void) {
         // Boucle de saisie — seule la zone input est mise à jour
         char password[SESSION_PASSWORD_LEN];
         int idx = 0;
+        int pw_focused = 1; // Un seul champ, toujours actif — clic dedans le confirme visuellement
+        int prev_btn_pw = 0;
         while (1) {
-            // Redessiner uniquement la zone de saisie (pas le fond entier !)
+            // Redessiner uniquement la zone de saisie
             screen_begin_ui();
-            vesa_invalidate_all(); // les cellules ont le même char '*' → forcer le redraw
-            gfx_fill_rect(input_x + 1, input_y + 1, input_w - 2, 26, 0x00111111);
+            vesa_invalidate_all();
+            uint32_t bd_pw = pw_focused ? UI_WHITE : UI_ACCENT;
+            gfx_fill_rect(input_x, input_y, input_w, 28, 0x00111111);
+            gfx_draw_rect(input_x, input_y, input_w, 28, bd_pw);
             for (int k = 0; k < idx; k++)
                 gfx_draw_text(input_x + 6 + k * FONT_W, input_y + 6,
                               "*", UI_WHITE, 0x00111111);
-            // Curseur clignotant
+            // Curseur
             gfx_fill_rect(input_x + 6 + idx * FONT_W, input_y + 6,
                           2, FONT_H - 4, UI_ACCENT);
             screen_end_ui();
 
-            char c = keyboard_get_char();
+            // Attendre clavier ou souris
+            char c = 0;
+            while (c == 0) {
+                c = input_poll_char();
+                // Clic dans la zone → focus visuel
+                int cur_btn_pw = g_mouse.btn_left;
+                if (cur_btn_pw && !prev_btn_pw) {
+                    if (g_mouse.x >= input_x && g_mouse.x < input_x + input_w &&
+                        g_mouse.y >= input_y && g_mouse.y < input_y + 28) {
+                        pw_focused = 1;
+                    } else {
+                        pw_focused = 0;
+                    }
+                    c = 1; // forcer redraw
+                }
+                prev_btn_pw = cur_btn_pw;
+                if (c == 1) break;
+            }
+            if (c == 1) continue; // clic → redraw
+
             if (c == '\n' || c == '\r') {
                 password[idx] = '\0';
                 break;

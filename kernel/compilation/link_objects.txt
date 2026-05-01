@@ -1,4 +1,6 @@
 kernel/compilation/kernel_shell_main.o
+kernel/compilation/kernel_apps_fileman.o
+kernel/compilation/kernel_apps_terminal.o
 kernel/compilation/kernel_apps_textedit.o
 kernel/compilation/kernel_drivers_ata.o
 kernel/compilation/kernel_drivers_input.o
@@ -14,7 +16,6 @@ kernel/compilation/kernel_lib_utils.o
 kernel/compilation/kernel_mem_mem_boot.o
 kernel/compilation/kernel_mem_pfa.o
 kernel/compilation/kernel_shell_shell.o
-kernel/compilation/kernel_shell_terminal.o
 kernel/compilation/kernel_shell_tex.o
 kernel/compilation/kernel_ui_desktop.o
 kernel/compilation/kernel_ui_session.o

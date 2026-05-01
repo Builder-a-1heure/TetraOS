@@ -73,9 +73,10 @@ typedef enum {
     ACL_EXEC  = 2,  // cd dans un dossier / exécuter un .tex
 } AclOp;
 
-// UID spécial pour les nœuds système
-#define UID_SYSTEM  0xFFFF
-#define UID_NOOWNER 0xFFFE
+// UID spéciaux
+#define UID_SYSTEM  0xFFFF   // nœuds créés avant les sessions
+#define UID_NOOWNER 0xFFFE   // nœud sans propriétaire
+#define UID_ROOT    0xFFFD   // opération système root (session_root_enter)
 
 // --- File Header (stored at beginning of each file on disk) ---
 typedef struct __attribute__((packed)) __FileHeader__ {

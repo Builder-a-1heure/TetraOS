@@ -9,3 +9,5 @@
 *.img
 .DS_Store
 /qemu
+initTetraOS.sh
+initTetraOS.bat

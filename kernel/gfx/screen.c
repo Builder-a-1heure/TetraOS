@@ -297,6 +297,7 @@ void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alp
     for (int py = y; py < y2; py++)
         for (int px = x; px < x2; px++)
             gfx_blend_pixel(px, py, color, alpha);
+    vesa_invalidate_rect(x, y, x2 - x, y2 - y);
 }
 
 void gfx_stroke_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
@@ -310,6 +311,7 @@ void gfx_stroke_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t a
         gfx_blend_pixel(x, yi, color, alpha);
         gfx_blend_pixel(x2, yi, color, alpha);
     }
+    vesa_invalidate_rect(x, y, w, h);
 }
 
 // Remplir un rectangle plein
@@ -326,6 +328,10 @@ void gfx_fill_rect(int x, int y, int w, int h, uint32_t color) {
     for (int py = y; py < y2; py++)
         for (int px = x; px < x2; px++)
             vesa_put_pixel(px, py, color);
+    // Invalider les cellules glyphe recouvertes : sans ça, vesa_draw_glyph()
+    // croirait les cellules inchangées (dirty check) et ne redessinerait pas
+    // le texte qui sera dessiné par-dessus ce rectangle.
+    vesa_invalidate_rect(x, y, x2 - x, y2 - y);
 }
 
 // Contour d'un rectangle
@@ -340,6 +346,7 @@ void gfx_draw_rect(int x, int y, int w, int h, uint32_t color) {
 // Ligne (Bresenham)
 void gfx_draw_line(int x0, int y0, int x1, int y1, uint32_t color) {
     if (!vesa_active()) return;
+    int ox0 = x0, oy0 = y0;
     int dx =  (x1 > x0 ? x1 - x0 : x0 - x1);
     int dy = -(y1 > y0 ? y1 - y0 : y0 - y1);
     int sx = x0 < x1 ? 1 : -1;
@@ -352,6 +359,12 @@ void gfx_draw_line(int x0, int y0, int x1, int y1, uint32_t color) {
         if (e2 >= dy) { err += dy; x0 += sx; }
         if (e2 <= dx) { err += dx; y0 += sy; }
     }
+    // Invalider la bounding box de la ligne
+    int lx = ox0 < x1 ? ox0 : x1;
+    int ly = oy0 < y1 ? oy0 : y1;
+    int lw = (ox0 > x1 ? ox0 : x1) - lx + 1;
+    int lh = (oy0 > y1 ? oy0 : y1) - ly + 1;
+    vesa_invalidate_rect(lx, ly, lw, lh);
 }
 
 // Cercle (Midpoint)
@@ -371,6 +384,7 @@ void gfx_draw_circle(int cx, int cy, int r, uint32_t color) {
         if (err <= 0) { err += 2*y + 1; }
         else          { x--; err += 2*(y - x) + 1; }
     }
+    vesa_invalidate_rect(cx - r, cy - r, 2*r + 1, 2*r + 1);
 }
 
 // Cercle plein

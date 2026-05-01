@@ -43,6 +43,7 @@ typedef struct {
     Session sessions[MAX_SESSIONS];        // Toutes les sessions
     int session_count;                     // Nombre de sessions
     uint8_t logged_in;                     // 1 si connecté
+    uint8_t root_context;                  // 1 si opération système en cours (création session, home, init FS)
 } SessionManager;
 
 // Gestionnaire global
@@ -58,6 +59,16 @@ void session_load(void);
 
 // Sauvegarde les sessions sur le disque
 void session_save(void);
+
+// === Contexte root système ===
+// Active/désactive un contexte super-root temporaire qui bypass toutes les ACL.
+// À utiliser UNIQUEMENT pour les opérations d'initialisation système
+// (création de sessions, de répertoires home, formatage FS).
+// Ces fonctions sont réentrantes (compteur de profondeur interne).
+void session_root_enter(void);
+void session_root_exit(void);
+// Retourne 1 si le root context est actif
+int  session_is_root(void);
 
 // === Fonctions de gestion des sessions ===
 

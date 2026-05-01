@@ -230,6 +230,61 @@ char get_input_char() {
 //   bit5 = 0 : elle vient du clavier
 // On ne lit JAMAIS le port 0x60 sans avoir vérifié bit5 d'abord.
 // ============================================================
+
+// Traite un scancode et retourne le caractère (0 = rien / modificateur)
+static char process_keyboard_scancode(uint8_t scancode) {
+    if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return 0; }
+    if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return 0; }
+    if (scancode == 0x1D) { ctrl_pressed = 1;  return 0; }
+    if (scancode == 0x9D) { ctrl_pressed = 0;  return 0; }
+    if (scancode & 0x80)  return 0; // key-up
+
+    if (scancode == 0x01) return 27;
+    if (scancode == 0x0E) return '\b';
+    if (scancode == 0x48) return 16;  // ↑
+    if (scancode == 0x50) return 14;  // ↓
+    if (scancode == 0x4B) return 17;  // ←
+    if (scancode == 0x4D) return 18;  // →
+
+    if (scancode < 256) {
+        char c = shift_pressed ? (char)keyboard_map_shift[scancode]
+                               : (char)keyboard_map[scancode];
+        if (ctrl_pressed) {
+            ctrl_pressed = 0;
+            if (c == 'c' || c == 'C') return 3;
+            if (c == 's' || c == 'S') return 19;
+            if (c == 'q' || c == 'Q') return 17;
+            return 0;
+        }
+        if (c) return c;
+    }
+    return 0;
+}
+
+// NON-BLOQUANT : retourne 0 immédiatement si aucune donnée dans le buffer.
+// Traite les paquets souris au passage.
+// À utiliser dans les boucles UI qui doivent aussi lire la souris.
+char input_poll_char(void) {
+    uint8_t st;
+    __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
+    if (!(st & 1)) return 0; // rien → retour immédiat
+
+    if (mouse_in_packet()) {
+        if (mouse_poll()) on_mouse_packet_complete();
+        return 0;
+    }
+    if (st & (1 << 5)) {
+        if (mouse_poll()) on_mouse_packet_complete();
+        return 0;
+    }
+
+    uint8_t scancode;
+    __asm__ __volatile__("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
+    return process_keyboard_scancode(scancode);
+}
+
+// BLOQUANT : boucle jusqu'à avoir une donnée (clavier ou souris).
+// Retourne 0 pour les events souris, caractère sinon.
 char input_dispatch_char(void) {
     while (1) {
         uint8_t st;
@@ -237,58 +292,21 @@ char input_dispatch_char(void) {
 
         if (!(st & 1)) {
             __asm__ __volatile__("nop");
-            continue; // buffer vide
+            continue;
         }
 
-        // Paquet souris déjà commencé : les octets 2 et 3 doivent aller à la souris
-        // même si le bit 5 du status est à 0 (QEMU / VirtualBox le signalent mal).
         if (mouse_in_packet()) {
-            if (mouse_poll())
-                on_mouse_packet_complete();
+            if (mouse_poll()) on_mouse_packet_complete();
             return 0;
         }
-
         if (st & (1 << 5)) {
-            if (mouse_poll())
-                on_mouse_packet_complete();
+            if (mouse_poll()) on_mouse_packet_complete();
             return 0;
         }
 
-        // ── Donnée clavier ─────────────────────────────────────
         uint8_t scancode;
         __asm__ __volatile__("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
-
-        // Modificateurs
-        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return 0; }
-        if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return 0; }
-        if (scancode == 0x1D) { ctrl_pressed = 1;  return 0; }
-        if (scancode == 0x9D) { ctrl_pressed = 0;  return 0; }
-
-        // Key-up → ignorer
-        if (scancode & 0x80) return 0;
-
-        // Touches spéciales
-        if (scancode == 0x01) return 27;   // ESC
-        if (scancode == 0x0E) return '\b'; // Backspace
-        if (scancode == 0x48) return 16;   // Flèche haut
-        if (scancode == 0x50) return 14;   // Flèche bas
-        if (scancode == 0x4B) return 17;   // Flèche gauche
-        if (scancode == 0x4D) return 18;   // Flèche droite
-
-        // Touche normale
-        if (scancode < 256) {
-            char c = shift_pressed ? (char)keyboard_map_shift[scancode]
-                                   : (char)keyboard_map[scancode];
-            if (ctrl_pressed) {
-                ctrl_pressed = 0;
-                if (c == 'c' || c == 'C') return 3;
-                if (c == 's' || c == 'S') return 19;
-                if (c == 'q' || c == 'Q') return 17;
-                return 0;
-            }
-            if (c) return c;
-        }
-        return 0;
+        return process_keyboard_scancode(scancode);
     }
 }
 

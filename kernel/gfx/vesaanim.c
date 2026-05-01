@@ -262,7 +262,8 @@ void vesa_boot_anim(void) {
     uint32_t  total_pixels = vesa_pitch() / 4 * vesa_height();
     for (uint32_t i = 0; i < total_pixels; i++) fb[i] = 0;
 
-    // Laisser vesa_clear_back déjà appelé en début de fonction —
-    // g_drawn est invalide donc le prochain vesa_flush() du terminal
-    // redessine tout proprement.
+    // Invalider le dirty cache : l'animation a écrit directement dans
+    // le framebuffer sans passer par vesa_draw_glyph. Sans ça, le cache
+    // croit que les cellules sont déjà à jour et bloque le rendu du login.
+    vesa_invalidate_all();
 }
