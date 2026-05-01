@@ -1,5 +1,5 @@
 # TetraOS
-TetraOS est conçu pour pouvoir l'utiliser dans la gestion de structure d'entrainement et utilisation de model d'IA entrainé dans la domotique et l'agentique en edge(assistant virtuel-réel Tetramon en Apple Inteligence like), mais le project actuel ne contien absolument rien de tout ça pour le moment, ce n'est qu'un OS barre métal comme plein d'autre, mais basé sur rien ...
+TetraOS est un OS barre-métal conçu par un étudiant français sur son temps libre pour s'amuser, bien que purement expérimentale et instructif, il est voué a évolué pour devenir potentiellement utilisable. Le mot clé de TetraOS est de découvrir et reproduire a ma manière le fonctionnement un system d'exploitation.
 
 Mon projet est conçu pour un processeur architecture 64x86, il fonctionne en mode 32 bits et es donc probablement compatible avec d'anciennes machines (a tester), une version arm64 est a venir mais pas tout de suite.
 J'interdit strictement toute forme de recopie a d'autre fin que l'experience personnel (j'entend par la que il est autoriser de recopier et utiliser TetraOS uniquement pour l'utilisation générique d'un OS, et la modification a des fins expérimental et non redistribuable en demandant quand meme avant sur mon discord trouvable dans ma bio ...).
