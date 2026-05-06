@@ -380,7 +380,7 @@ static void ui_draw_logo(int cx, int y) {
     gfx_draw_circle(cx, y + 28, 38, UI_ACCENT);
     gfx_draw_circle(cx, y + 28, 34, UI_ACCENT2);
     gfx_draw_text_centered(cx - 120, y + 20, 240, "TetraOS", UI_WHITE,  0x00000000);
-    gfx_draw_text_centered(cx - 120, y + 38, 240, "v1.0",    UI_GRAY,   0x00000000);
+    gfx_draw_text_centered(cx - 120, y + 38, 240, "v1.6",    UI_GRAY,   0x00000000);
 }
 
 static void ui_draw_panel(int x, int y, int w, int h) {

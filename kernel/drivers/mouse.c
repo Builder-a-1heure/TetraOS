@@ -83,6 +83,51 @@ static int      g_pkt_idx = 0;
 // Retourne 1 si on est en milieu de réception d'un paquet (octets 2 ou 3)
 int mouse_in_packet(void) { return g_pkt_idx > 0; }
 
+// Force le reset du paquet en cours (utilisé par le guard anti-fuite PS/2)
+void mouse_reset_packet(void) {
+    g_pkt_idx = 0;
+}
+
+// Injecte un octet directement dans le buffer de paquet souris.
+// Retourne 1 si le paquet est complet et décodé, 0 sinon.
+// Utilisé par le dispatcher PS/2 quand bit5=0 mais l'octet ressemble
+// à un premier octet de paquet souris (bit3=1).
+int mouse_feed_byte(uint8_t byte) {
+    g_pkt[g_pkt_idx++] = byte;
+
+    // Resynchronisation : premier octet doit avoir bit3=1
+    if (g_pkt_idx == 1 && !(byte & (1 << 3))) {
+        g_pkt_idx = 0;
+        return 0;
+    }
+
+    if (g_pkt_idx < 3) return 0;  // paquet incomplet
+    g_pkt_idx = 0;
+
+    // Décoder
+    uint8_t flags = g_pkt[0];
+    int8_t  dx    = (int8_t)g_pkt[1];
+    int8_t  dy    = (int8_t)g_pkt[2];
+
+    if (!(flags & (1 << 6)) && !(flags & (1 << 7))) {
+        int mdx = (int)dx;
+        int mdy = (int)dy;
+        if (flags & (1 << 4)) mdx |= ~0xFF;
+        if (flags & (1 << 5)) mdy |= ~0xFF;
+        g_mouse.x += mdx;
+        g_mouse.y -= mdy;
+        int sw=(int)vesa_width(), sh=(int)vesa_height();
+        if (g_mouse.x<0) g_mouse.x=0;
+        if (g_mouse.y<0) g_mouse.y=0;
+        if (g_mouse.x>=sw) g_mouse.x=sw-1;
+        if (g_mouse.y>=sh) g_mouse.y=sh-1;
+    }
+    g_mouse.btn_left   = (flags & (1<<0)) ? 1 : 0;
+    g_mouse.btn_right  = (flags & (1<<1)) ? 1 : 0;
+    g_mouse.btn_middle = (flags & (1<<2)) ? 1 : 0;
+    return 1;
+}
+
 // ============================================================
 // Initialisation
 // ============================================================

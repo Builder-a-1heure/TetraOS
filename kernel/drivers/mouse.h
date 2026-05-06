@@ -14,6 +14,8 @@ typedef struct {
 
 extern MouseState g_mouse;
 int  mouse_in_packet(void);
+void mouse_reset_packet(void);   // reset paquet en cours (guard PS/2)
+int  mouse_feed_byte(uint8_t byte); // injection octet pour dispatcher PS/2
 void mouse_reset_cursor(void);
 
 // Initialise la souris PS/2 via le contrôleur 8042

@@ -49,6 +49,8 @@ typedef void (*AppCloseCb)(WinID win);
 typedef void (*AppKeyCb)  (WinID win, char key);
 typedef void (*AppDrawCb) (WinID win, DawID daw,
                            int abs_x, int abs_y, int w, int h);
+// Callback fond desktop — voir app_set_bg_callback()
+typedef void (*AppBgCb)   (int x, int y, int w, int h);
 
 // ============================================================
 // Palette fenêtre
@@ -178,5 +180,9 @@ DawID app_new_drawarea(WinID wid, int x, int y, int w, int h, AppDrawCb cb);
 
 // Force le redraw de la draw area au prochain tick.
 void  app_drawarea_invalidate(DawID did);
+
+// Enregistre le callback de fond desktop pour l'effacement propre
+// des fenêtres déplacées. À appeler depuis desktop.c après app_init().
+void  app_set_bg_callback(void (*cb)(int, int, int, int));
 
 #endif // APPCORE_H

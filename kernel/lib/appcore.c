@@ -6,11 +6,6 @@
 #include "../drivers/vesa.h"
 #include "../drivers/mouse.h"
 
-extern int           shift_pressed;
-extern int           ctrl_pressed;
-extern unsigned char keyboard_map[256];
-extern unsigned char keyboard_map_shift[256];
-
 // ============================================================
 // Structures internes
 // ============================================================
@@ -24,6 +19,7 @@ typedef struct {
     int    hovered;
     int    pressed;
     int    touched;
+    int    dirty;        // 1 = ce bouton seul doit être repeint
     AppClickCb cb;
 } Button;
 
@@ -33,6 +29,7 @@ typedef struct {
     int      x, y;
     char     text[128];
     uint32_t color;
+    int      dirty;      // 1 = ce label seul doit être repeint
 } Label;
 
 typedef struct {
@@ -47,12 +44,13 @@ typedef struct {
     int      item_h;
     LstItem  items[AC_LST_MAX_ITEMS];
     int      count;
-    int      selected;   // index sélectionné (-1 = aucun)
-    int      scroll;     // première ligne visible
-    int      hovered;    // index survolé (-1 = aucun)
-    int      clicked;    // flag : sélection changée
-    int      activated;  // flag : double-clic
-    int      last_click_idx; // pour détecter double-clic
+    int      selected;
+    int      scroll;
+    int      hovered;
+    int      clicked;
+    int      activated;
+    int      last_click_idx;
+    int      dirty;      // 1 = listbox entière à repeindre
 } Listbox;
 
 typedef struct {
@@ -71,6 +69,8 @@ typedef struct {
     int    dirty;
     int    dragging;
     int    drag_ox, drag_oy;
+    int    prev_x, prev_y;   // position au tick précédent (pour erase-on-move)
+    int    moved;            // 1 si la fenêtre a bougé ce tick
     AppCloseCb close_cb;
     AppKeyCb   key_cb;
 } Window;
@@ -88,6 +88,11 @@ static int      g_redrawn_this_tick;
 static WinID    g_zorder[AC_MAX_WINDOWS];
 static int      g_zcount;
 static int      g_prev_left;
+
+// Callback de fond desktop — void cb(int x, int y, int w, int h)
+// Type défini inline pour éviter tout problème d'ordre d'include.
+typedef void (*FeBgCb_t)(int, int, int, int);
+static FeBgCb_t g_bg_cb = 0;
 
 // ============================================================
 // Helpers
@@ -277,73 +282,165 @@ static void draw_window(WinID wid, int has_focus) {
 }
 
 // ============================================================
-// Redraw global
+// Effacement d'une zone avec le fond desktop
 // ============================================================
+
+// Repeint le fond sur la zone (x,y,w,h) — via le callback desktop si dispo,
+// sinon fond noir uni. Utilisé pour effacer l'ancienne position d'une fenêtre.
+static void erase_rect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    // Clamp aux limites écran
+    int sw = (int)vesa_width(), sh = (int)vesa_height();
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sw) w = sw - x;
+    if (y + h > sh) h = sh - y;
+    if (w <= 0 || h <= 0) return;
+
+    if (g_bg_cb) {
+        // Le desktop repeint son dégradé sur cette zone exacte
+        g_bg_cb(x, y, w, h);
+    } else {
+        // Fallback : noir
+        gfx_fill_rect(x, y, w, h, 0x00000000);
+    }
+}
+
+// ============================================================
+// Redraw partiel — ne repeint que les widgets dirty
+// ============================================================
+
+// Repeint un bouton dirty sans toucher à la fenêtre entière.
+static void redraw_button(int bid) {
+    Button* b = &g_btns[bid];
+    if (!b->used || !b->dirty) return;
+    WinID wid = b->win;
+    if (!g_wins[wid].used || !g_wins[wid].open) { b->dirty=0; return; }
+    mouse_erase_cursor();
+    draw_button(wid, bid);
+    mouse_draw_cursor();
+    b->dirty = 0;
+}
+
+// Repeint une listbox dirty sans toucher à la fenêtre entière.
+static void redraw_listbox(int lid) {
+    Listbox* lb = &g_lsts[lid];
+    if (!lb->used || !lb->dirty) return;
+    WinID wid = lb->win;
+    if (!g_wins[wid].used || !g_wins[wid].open) { lb->dirty=0; return; }
+    mouse_erase_cursor();
+    draw_listbox(wid, lid);
+    mouse_draw_cursor();
+    lb->dirty = 0;
+}
+
+// Repeint un label dirty.
+static void redraw_label(int lid) {
+    Label* l = &g_lbls[lid];
+    if (!l->used || !l->dirty) return;
+    WinID wid = l->win;
+    if (!g_wins[wid].used || !g_wins[wid].open) { l->dirty=0; return; }
+    mouse_erase_cursor();
+    // Effacer l'ancienne zone texte (128 chars max × font dims)
+    int ax = win_cx(wid)+l->x, ay = win_cy(wid)+l->y;
+    gfx_fill_rect(ax, ay, 128*FONT_W, FONT_H, AC_WIN_BG);
+    draw_label(wid, lid);
+    mouse_draw_cursor();
+    l->dirty = 0;
+}
+
+// Retourne 1 si au moins une fenêtre entière est dirty (nécessite full redraw).
+static int any_win_dirty(void) {
+    for (int i=0;i<AC_MAX_WINDOWS;i++)
+        if (g_wins[i].used && g_wins[i].open && g_wins[i].dirty) return 1;
+    return 0;
+}
+
+// Retourne 1 si au moins un widget individuel est dirty (redraw partiel possible).
+static int any_widget_dirty(void) {
+    for (int i=0;i<AC_MAX_BUTTONS;   i++) if (g_btns[i].used && g_btns[i].dirty) return 1;
+    for (int i=0;i<AC_MAX_LISTBOXES; i++) if (g_lsts[i].used && g_lsts[i].dirty) return 1;
+    for (int i=0;i<AC_MAX_LABELS;    i++) if (g_lbls[i].used && g_lbls[i].dirty) return 1;
+    for (int i=0;i<AC_MAX_DRAWAREAS; i++) if (g_daws[i].used && g_daws[i].dirty) return 1;
+    return 0;
+}
+
+// Redraw COMPLET de toutes les fenêtres (déplacement, focus change, etc.)
 static void redraw_all(void) {
     mouse_erase_cursor();
     screen_begin_ui();
+
+    // Passe 1 : effacer les anciens pixels des fenêtres déplacées
+    for (int i=g_zcount-1; i>=0; i--) {
+        WinID wid=g_zorder[i];
+        Window* w=&g_wins[wid];
+        if (!w->used || !w->open || !w->moved) continue;
+        erase_rect(w->prev_x, w->prev_y, w->w, w->h+AC_WIN_TITLE_H);
+    }
+
+    // Passe 2 : redessiner toutes les fenêtres dans l'ordre Z
     WinID focus=focused_win();
     for (int i=0; i<g_zcount; i++) {
         WinID wid=g_zorder[i];
         if (g_wins[wid].open) draw_window(wid, wid==focus);
     }
+
     screen_end_ui();
     mouse_draw_cursor();
-    for (int i=0; i<AC_MAX_WINDOWS; i++) g_wins[i].dirty=0;
-    for (int i=0; i<AC_MAX_DRAWAREAS; i++) g_daws[i].dirty=0;
+
+    // Reset tous les flags dirty
+    for (int i=0;i<AC_MAX_WINDOWS;  i++) { g_wins[i].dirty=0; g_wins[i].moved=0; }
+    for (int i=0;i<AC_MAX_BUTTONS;  i++) g_btns[i].dirty=0;
+    for (int i=0;i<AC_MAX_LISTBOXES;i++) g_lsts[i].dirty=0;
+    for (int i=0;i<AC_MAX_LABELS;   i++) g_lbls[i].dirty=0;
+    for (int i=0;i<AC_MAX_DRAWAREAS;i++) g_daws[i].dirty=0;
     g_redrawn_this_tick=1;
 }
 
-static int any_dirty(void) {
-    for (int i=0; i<AC_MAX_WINDOWS; i++)
-        if (g_wins[i].used && g_wins[i].open && g_wins[i].dirty) return 1;
-    return 0;
-}
-
-// ============================================================
-// Clavier non-bloquant
-// ============================================================
-static char read_key_nb(void) {
-    uint8_t st;
-    __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
-    if (!(st & 1)) return 0;
-    if (mouse_in_packet() || (st & (1<<5))) {
-        if (mouse_poll()) { mouse_erase_cursor(); mouse_draw_cursor(); }
-        return 0;
-    }
-    uint8_t sc;
-    __asm__ __volatile__("inb %1, %0" : "=a"(sc) : "Nd"((uint16_t)0x60));
-    if (sc==0x2A||sc==0x36) { shift_pressed=1; return 0; }
-    if (sc==0xAA||sc==0xB6) { shift_pressed=0; return 0; }
-    if (sc==0x1D)            { ctrl_pressed=1;  return 0; }
-    if (sc==0x9D)            { ctrl_pressed=0;  return 0; }
-    if (sc & 0x80)  return 0;
-    if (sc==0x01) return 27;
-    if (sc==0x0E) return '\b';
-    if (sc==0x0F) return '\t';
-    if (sc==0x1C) return '\n';
-    if (sc==0x48) return 16;
-    if (sc==0x50) return 14;
-    if (sc==0x4B) return 17;
-    if (sc==0x4D) return 18;
-    if (sc<128) {
-        char c = shift_pressed ? (char)keyboard_map_shift[sc]
-                               : (char)keyboard_map[sc];
-        if (ctrl_pressed) {
-            ctrl_pressed=0;
-            if (c=='s'||c=='S') return 19;   // Ctrl+S → sauvegarder
-            if (c=='n'||c=='N') return 29;   // Ctrl+N → nouveau (29, distinct de flèche bas=14)
-            if (c>='a'&&c<='z') return c-'a'+1;
-            if (c>='A'&&c<='Z') return c-'A'+1;
-            return 0;
+// Redraw PARTIEL : ne repeint que les widgets individuellement dirty.
+// Utilisé quand seuls des boutons/listboxes/labels ont changé d'état
+// (hover, sélection) — évite de tout repeindre pour un simple survol.
+static void redraw_dirty_widgets(void) {
+    // Labels
+    for (int i=0;i<AC_MAX_LABELS;i++) redraw_label(i);
+    // Boutons
+    for (int i=0;i<AC_MAX_BUTTONS;i++) redraw_button(i);
+    // Listboxes
+    for (int i=0;i<AC_MAX_LISTBOXES;i++) redraw_listbox(i);
+    // DrawAreas (toujours full si elles sont dirty)
+    WinID focus=focused_win();
+    for (int i=0;i<AC_MAX_DRAWAREAS;i++) {
+        if (!g_daws[i].used||!g_daws[i].dirty) continue;
+        WinID wid=g_daws[i].win;
+        if (g_wins[wid].open) {
+            mouse_erase_cursor();
+            draw_drawarea(wid,i);
+            mouse_draw_cursor();
         }
-        return c;
+        g_daws[i].dirty=0;
+        (void)focus;
     }
-    return 0;
+    g_redrawn_this_tick=1;
+}
+
+static int any_dirty(void) __attribute__((unused));
+static int any_dirty(void) {
+    return any_win_dirty() || any_widget_dirty();
 }
 
 // ============================================================
-// Gestion souris
+// Clavier non-bloquant — délègue au dispatcher centralisé
+// ============================================================
+// On n'accède PLUS directement au port 0x64/0x60 ici.
+// input_poll_char() gère le tri clavier/souris via le bit5.
+extern char input_poll_char(void);
+
+static char read_key_nb(void) {
+    return input_poll_char();
+}
+
+// ============================================================
+// Gestion souris — dirty par widget, pas par fenêtre entière
 // ============================================================
 static void process_mouse(void) {
     int mx=g_mouse.x, my=g_mouse.y;
@@ -352,8 +449,11 @@ static void process_mouse(void) {
     int left_up  = !left &&  g_prev_left;
 
     WinID top=z_top_at(mx,my);
-    if (left_down && top!=APPCORE_INVALID) {
+
+    // Changement de focus → redraw chrome des deux fenêtres concernées
+    if (left_down && top!=APPCORE_INVALID && top!=focused_win()) {
         z_bring_front(top);
+        // Marquer toutes les fenêtres dirty pour redraw chrome
         for (int i=0; i<AC_MAX_WINDOWS; i++)
             if (g_wins[i].used) g_wins[i].dirty=1;
     }
@@ -363,8 +463,10 @@ static void process_mouse(void) {
         Window* fw=&g_wins[focus];
         int close_x=fw->x+fw->w-AC_WIN_TITLE_H;
         int in_title=hit(mx,my, fw->x, fw->y, fw->w-AC_WIN_TITLE_H, AC_WIN_TITLE_H);
+
         if (left_down && in_title) {
             fw->dragging=1; fw->drag_ox=mx-fw->x; fw->drag_oy=my-fw->y;
+            fw->prev_x = fw->x; fw->prev_y = fw->y;
         }
         if (!left) fw->dragging=0;
         if (fw->dragging && left) {
@@ -373,7 +475,12 @@ static void process_mouse(void) {
             if (nx<0) nx=0; if (ny<0) ny=0;
             if (nx+fw->w>sw) nx=sw-fw->w;
             if (ny+win_total_h(focus)>sh-32) ny=sh-32-win_total_h(focus);
-            fw->x=nx; fw->y=ny; fw->dirty=1;
+            if (nx != fw->x || ny != fw->y) {
+                fw->prev_x = fw->x; fw->prev_y = fw->y;
+                fw->x=nx; fw->y=ny;
+                fw->moved=1;
+                fw->dirty=1;
+            }
         }
         int in_close=hit(mx,my, close_x, fw->y, AC_WIN_TITLE_H, AC_WIN_TITLE_H);
         if (left_down && in_close) {
@@ -382,29 +489,40 @@ static void process_mouse(void) {
         }
     }
 
-    // Boutons
+    // ── Boutons : dirty uniquement sur le bouton qui change d'état ──────
     for (int i=0; i<AC_MAX_BUTTONS; i++) {
         Button* b=&g_btns[i];
         if (!b->used || !b->enabled) continue;
         WinID wid=b->win;
         if (!g_wins[wid].open) continue;
         if (wid!=focused_win()) {
-            if (b->hovered||b->pressed) { b->hovered=b->pressed=0; g_wins[wid].dirty=1; }
+            // Dépresser/déhover si on perd le focus
+            if (b->hovered||b->pressed) {
+                b->hovered=b->pressed=0;
+                b->dirty=1;   // ← seulement ce bouton
+            }
             continue;
         }
         int ax=win_cx(wid)+b->x, ay=win_cy(wid)+b->y;
         int over=hit(mx,my,ax,ay,b->w,b->h);
-        int was=b->hovered; b->hovered=over;
-        if (b->hovered!=was) g_wins[wid].dirty=1;
-        if (left_down && over) { b->pressed=1; g_wins[wid].dirty=1; }
+
+        int was_hov=b->hovered;
+        b->hovered=over;
+        // Changement de hover → redraw de CE bouton seulement
+        if (b->hovered!=was_hov) b->dirty=1;
+
+        if (left_down && over) {
+            b->pressed=1;
+            b->dirty=1;
+        }
         if (left_up && b->pressed) {
             b->pressed=0;
             if (over) { b->touched=1; if (b->cb) b->cb(i); }
-            g_wins[wid].dirty=1;
+            b->dirty=1;
         }
     }
 
-    // Listboxes
+    // ── Listboxes : dirty uniquement sur la listbox qui change d'état ───
     for (int i=0; i<AC_MAX_LISTBOXES; i++) {
         Listbox* lb=&g_lsts[i];
         if (!lb->used) continue;
@@ -414,33 +532,31 @@ static void process_mouse(void) {
         int ax=win_cx(wid)+lb->x, ay=win_cy(wid)+lb->y;
         int visible=lb->h/lb->item_h;
 
-        // Hover
         int new_hov=-1;
         if (hit(mx,my,ax,ay,lb->w,lb->h)) {
             int rel=(my-ay)/lb->item_h;
             int idx=lb->scroll+rel;
             if (idx>=0 && idx<lb->count) new_hov=idx;
         }
-        if (new_hov!=lb->hovered) { lb->hovered=new_hov; g_wins[wid].dirty=1; }
+        if (new_hov!=lb->hovered) {
+            lb->hovered=new_hov;
+            lb->dirty=1;    // ← seulement cette listbox
+        }
 
-        // Scroll molette (via flèches haut/bas gérées dans app_tick)
-        // Clic simple → sélection
         if (left_down && new_hov>=0) {
-            if (new_hov==lb->last_click_idx && new_hov==lb->selected) {
-                lb->activated=1;   // double-clic détecté
-            }
+            if (new_hov==lb->last_click_idx && new_hov==lb->selected)
+                lb->activated=1;
             lb->last_click_idx=new_hov;
             lb->selected=new_hov;
             lb->clicked=1;
-            g_wins[wid].dirty=1;
+            lb->dirty=1;
         }
 
-        // Scroll : si sélection hors vue
         if (lb->selected>=0) {
             if (lb->selected < lb->scroll)
-                { lb->scroll=lb->selected; g_wins[wid].dirty=1; }
+                { lb->scroll=lb->selected; lb->dirty=1; }
             if (lb->selected >= lb->scroll+visible)
-                { lb->scroll=lb->selected-visible+1; g_wins[wid].dirty=1; }
+                { lb->scroll=lb->selected-visible+1; lb->dirty=1; }
         }
     }
 
@@ -476,32 +592,46 @@ char app_tick_get_key(void) {
 void app_tick(void) {
     g_redrawn_this_tick=0;
     char key=read_key_nb();
-    g_last_tick_key = key;   // rendre disponible via app_tick_get_key()
-    mouse_poll();
+    g_last_tick_key = key;
+    // NOTE : on ne rappelle PAS mouse_poll() ici.
+    // input_poll_char() (appelé via read_key_nb) gère déjà le dispatch
+    // clavier/souris sur le port 0x64 et appelle mouse_poll() lui-même
+    // quand l'octet vient de la souris. Un double appel à mouse_poll()
+    // consommerait un octet du prochain paquet souris (ou pire, un
+    // scancode clavier), ce qui corrompt la saisie clavier.
     process_mouse();
+
     if (key) {
         WinID focus=focused_win();
         if (focus!=APPCORE_INVALID && g_wins[focus].key_cb)
             g_wins[focus].key_cb(focus, key);
-        // Scroll listbox avec flèches
+        // Scroll listbox avec flèches — dirty seulement sur la listbox
         for (int i=0; i<AC_MAX_LISTBOXES; i++) {
             Listbox* lb=&g_lsts[i];
             if (!lb->used || lb->win!=focus) continue;
             int visible=lb->h/lb->item_h;
-            if (key==16 && lb->selected>0) {             // haut
+            if (key==16 && lb->selected>0) {
                 lb->selected--; lb->clicked=1;
                 if (lb->selected<lb->scroll) lb->scroll=lb->selected;
-                g_wins[focus].dirty=1;
-            } else if (key==14 && lb->selected<lb->count-1) { // bas
+                lb->dirty=1;    // ← listbox seule, pas la fenêtre entière
+            } else if (key==14 && lb->selected<lb->count-1) {
                 lb->selected++; lb->clicked=1;
                 if (lb->selected>=lb->scroll+visible) lb->scroll++;
-                g_wins[focus].dirty=1;
+                lb->dirty=1;
             } else if (key=='\n' && lb->selected>=0) {
                 lb->activated=1;
             }
         }
     }
-    if (any_dirty()) redraw_all();
+
+    // Choix : full redraw si une fenêtre entière est dirty (déplacement,
+    // focus change, fermeture, app_set_label qui doit effacer l'ancienne zone),
+    // sinon redraw partiel uniquement sur les widgets dirty.
+    if (any_win_dirty()) {
+        redraw_all();
+    } else if (any_widget_dirty()) {
+        redraw_dirty_widgets();
+    }
 }
 
 // ============================================================
@@ -513,6 +643,8 @@ WinID app_new_window(const char* title, int x, int y, int w, int h) {
         Window* win=&g_wins[i];
         win->used=1; win->open=1;
         win->x=x; win->y=y; win->w=w; win->h=h;
+        win->prev_x=x; win->prev_y=y;
+        win->moved=0;
         str_cpy(win->title, title, 64);
         win->dirty=1; win->dragging=0;
         win->close_cb=0; win->key_cb=0;
@@ -617,12 +749,14 @@ LblID app_new_label(WinID wid, int x, int y, const char* text) {
 
 void app_set_label_text(LblID lid, const char* text) {
     if (lid<0||lid>=AC_MAX_LABELS||!g_lbls[lid].used) return;
-    str_cpy(g_lbls[lid].text, text, 128); g_wins[g_lbls[lid].win].dirty=1;
+    str_cpy(g_lbls[lid].text, text, 128);
+    g_lbls[lid].dirty=1;   // ← label dirty, pas la fenêtre entière
 }
 
 void app_set_label_color(LblID lid, uint32_t color) {
     if (lid<0||lid>=AC_MAX_LABELS||!g_lbls[lid].used) return;
-    g_lbls[lid].color=color; g_wins[g_lbls[lid].win].dirty=1;
+    g_lbls[lid].color=color;
+    g_lbls[lid].dirty=1;   // ← idem
 }
 
 // ============================================================
@@ -710,4 +844,15 @@ void app_drawarea_invalidate(DawID did) {
     if (did<0||did>=AC_MAX_DRAWAREAS||!g_daws[did].used) return;
     g_daws[did].dirty=1;
     g_wins[g_daws[did].win].dirty=1;
+}
+// ============================================================
+// API publique — Callback fond desktop
+// ============================================================
+
+// Enregistre le callback appelé pour repeindre le fond sur une zone donnée.
+// À appeler depuis desktop.c après app_init() :
+//   app_set_bg_callback(my_desktop_bg_partial);
+// Le callback reçoit (x, y, w, h) et doit repeindre exactement cette zone.
+void app_set_bg_callback(void (*cb)(int, int, int, int)) {
+    g_bg_cb = (FeBgCb_t)cb;
 }

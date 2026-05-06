@@ -23,6 +23,9 @@
 #include "../lib/utils.h"
 #include "../apps/app.h"
 #include <stdint.h>
+#include "../fs/fs.h"
+
+#include "../shell/tex.h"
 
 // ============================================================
 // Symboles linker — bornes de la mémoire kernel
@@ -68,7 +71,10 @@ extern uint8_t _kernel_end[];
 typedef struct {
     int        x, y;
     int        hovered;
-    TexHeader* hdr;
+    TexHeader* hdr;             // pointeur vers le TexHeader natif (apps C compilées)
+    int        is_tex_script;   // 1 = script .tex du FS, 0 = app C native
+    char       tex_filename[64];// chemin du script si is_tex_script == 1
+    TexHeader  tex_hdr_copy;    // copie synthétique du header pour les scripts
 } IconState;
 
 // ============================================================
@@ -115,6 +121,140 @@ static void tex_scan(void) {
             g_icons[g_icon_count].hovered = 0;
             g_icon_count++;
         }
+    }
+}
+
+// ============================================================
+// Scanner les scripts .tex du FS qui contiennent @TEX_APP
+// ============================================================
+//
+// Format de la signature dans le script (n'importe où dans les 8 premières lignes) :
+//
+//   @TEX_APP(nom, icone, version)
+//
+//   nom     : affiché sous l'icône (max 15 chars)
+//   icone   : terminal | textedit | fileman | settings | generic
+//   version : ex. "1.0"
+//
+// Exemple dans un script .tex :
+//   // @TEX_APP(MonApp, generic, 1.0)
+//   import io
+//   io.println("Hello")
+//
+// Le commentaire // est optionnel — la ligne peut commencer directement par @TEX_APP.
+
+static AppIconType parse_icon_type(const char* s) {
+    // Comparer manuellement (pas de strcmp disponible facilement ici)
+    if (s[0]=='t' && s[1]=='e' && s[2]=='r') return APPICON_TERMINAL;
+    if (s[0]=='t' && s[1]=='e' && s[2]=='x') return APPICON_TEXTEDIT;
+    if (s[0]=='f' && s[1]=='i')              return APPICON_FILEMAN;
+    if (s[0]=='s' && s[1]=='e')              return APPICON_SETTINGS;
+    return APPICON_GENERIC;
+}
+
+static void tex_scan_scripts(void) {
+    // Lister les nœuds du répertoire courant (g_cwd) et en chercher en .tex
+    // On passe par fs_list_nodes via l'accès direct à g_fs
+    extern FSTable g_fs;
+    extern uint32_t g_cwd;
+
+    static uint8_t script_buf[512]; // buffer de lecture partiel (header seulement)
+
+    for (uint32_t ni = 0; ni < g_fs.node_count && g_icon_count < DESKTOP_MAX_ICONS; ni++) {
+        FSNode* node = &g_fs.nodes[ni];
+
+        // Ignorer dossiers et nœuds vides
+        if (node->is_dir) continue;
+        if (node->name[0] == '\0') continue;
+
+        // Vérifier extension .tex
+        int nlen = 0;
+        while (node->name[nlen] && nlen < FS_NAME_LEN) nlen++;
+        if (nlen < 5) continue; // trop court pour "x.tex"
+        if (node->name[nlen-4] != '.' ||
+            node->name[nlen-3] != 't' ||
+            node->name[nlen-2] != 'e' ||
+            node->name[nlen-1] != 'x') continue;
+
+        // Lire les 512 premiers octets du script
+        int bytes = fs_read_file(node->name, script_buf, sizeof(script_buf) - 1);
+        if (bytes <= 0) continue;
+        script_buf[bytes] = '\0';
+
+        // Chercher @TEX_APP dans les 8 premières lignes
+        char* sig_pos = 0;
+        int   lines_checked = 0;
+        char* p = (char*)script_buf;
+        while (*p && lines_checked < 8) {
+            // Sauter espaces/commentaires en début de ligne
+            while (*p == ' ' || *p == '\t') p++;
+            if (p[0] == '/' && p[1] == '/') p += 2; // sauter //
+            while (*p == ' ' || *p == '\t') p++;
+            // Chercher @TEX_APP
+            if (p[0] == '@' && p[1] == 'T' && p[2] == 'E' && p[3] == 'X' &&
+                p[4] == '_' && p[5] == 'A' && p[6] == 'P' && p[7] == 'P') {
+                sig_pos = p;
+                break;
+            }
+            // Aller à la ligne suivante
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') { p++; lines_checked++; }
+        }
+        if (!sig_pos) continue;
+
+        // Parser @TEX_APP(nom, icone, version)
+        char app_name[16]; app_name[0] = '\0';
+        char app_icon[16]; app_icon[0] = '\0';
+
+        p = sig_pos + 8; // après @TEX_APP
+        while (*p == ' ') p++;
+        if (*p == '(') p++;
+
+        // Argument 1 : nom
+        int i = 0;
+        while (*p && *p != ',' && *p != ')' && i < 15)
+            app_name[i++] = *p++;
+        app_name[i] = '\0';
+        // Trim espaces droite
+        while (i > 0 && (app_name[i-1] == ' ' || app_name[i-1] == '\t')) app_name[--i] = '\0';
+        if (*p == ',') p++;
+
+        // Argument 2 : icone
+        while (*p == ' ') p++;
+        i = 0;
+        while (*p && *p != ',' && *p != ')' && i < 15)
+            app_icon[i++] = *p++;
+        app_icon[i] = '\0';
+        while (i > 0 && (app_icon[i-1] == ' ' || app_icon[i-1] == '\t')) app_icon[--i] = '\0';
+
+        if (app_name[0] == '\0') continue; // pas de nom = pas d'icône
+
+        // Construire l'IconState pour ce script
+        IconState* st = &g_icons[g_icon_count];
+        st->is_tex_script = 1;
+        st->hovered = 0;
+        st->x = ICON_COL_X;
+        st->y = ICON_START_Y + g_icon_count * ICON_STRIDE;
+
+        // Copier le nom du fichier
+        for (int k = 0; k < 63 && node->name[k]; k++) st->tex_filename[k] = node->name[k];
+        st->tex_filename[63] = '\0';
+
+        // Remplir le header synthétique
+        st->tex_hdr_copy.magic     = TEX_MAGIC;
+        st->tex_hdr_copy.icon_type = (uint8_t)parse_icon_type(app_icon);
+        st->tex_hdr_copy.ver_major = 1;
+        st->tex_hdr_copy.ver_minor = 0;
+        st->tex_hdr_copy.flags     = APP_FLAG_DESKTOP;
+        st->tex_hdr_copy.entry     = 0; // pas de fonction C — on passe par tex_execute
+        st->tex_hdr_copy.reserved  = 0;
+        for (int k = 0; k < 15; k++) st->tex_hdr_copy.name[k] = app_name[k];
+        st->tex_hdr_copy.name[15]  = '\0';
+
+        // Pointer hdr sur la copie locale
+        st->hdr = &st->tex_hdr_copy;
+
+        g_icon_count++;
     }
 }
 

@@ -1,0 +1,204 @@
+// ============================================================
+//  calculatrice.tex — Mini calculatrice graphique pour TetraOS
+//
+//  Utilise : include @package.AppCore
+//
+//  Fonctionnalités :
+//    - Chiffres 0–9, virgule décimale
+//    - Opérations : + - * /
+//    - [=]   calculer le résultat
+//    - [C]   tout effacer
+//    - [Del] effacer le dernier caractère
+//    - Affichage : expression en bleu, résultat en vert (ou rouge si erreur)
+//    - Après [=], la prochaine saisie repart de zéro
+//
+//  Note : le moteur TEX évalue les expressions arithmétiques
+//  directement (3+4*2, 10/4, etc.) via tex_eval_expr, donc
+//  on passe la chaîne expr directement au moteur pour le calcul.
+// ============================================================
+
+include @package.AppCore
+
+// ── Variables d'état ─────────────────────────────────────────
+var expr     = "0"     // Expression en cours
+var op_faite = 0       // 1 si on vient de faire = (prochaine saisie repart de zéro)
+var MAX_LEN  = 24      // Longueur max de l'expression
+
+// ── Fenêtre ───────────────────────────────────────────────────
+app.init()
+app.window("Calculatrice", 300, 180, 314, 410, win)
+
+// ── Zone d'affichage ─────────────────────────────────────────
+
+// Label expression (ce que l'utilisateur tape)
+app.label(win, 12, 12, "0", lbl_expr)
+app.label_color(lbl_expr, 0x0077AACC)
+
+// Label résultat (affiché après =)
+app.label(win, 12, 40, "", lbl_result)
+app.label_color(lbl_result, 0x00AAFFAA)
+
+// Ligne de séparation décorative
+app.label(win, 12, 68, "______________________________", lbl_sep)
+app.label_color(lbl_sep, 0x00223344)
+
+// ── Grille de boutons (4×5) ───────────────────────────────────
+//
+//  Col :   10     80    150    220
+//  Lg1:  [ C  ] [Del] [ / ] [ * ]    y=82
+//  Lg2:  [ 7  ] [ 8 ] [ 9 ] [ - ]    y=118
+//  Lg3:  [ 4  ] [ 5 ] [ 6 ] [ + ]    y=154
+//  Lg4:  [ 1  ] [ 2 ] [ 3 ] [   ]    y=190   \
+//  Lg5:  [  0   ] [ . ]     [ = ]    y=226   /  = sur 2 lignes
+
+// Ligne 1
+app.btn(win,  10, 82, 64, 32, "C",   b_c)
+app.btn(win,  80, 82, 64, 32, "Del", b_del)
+app.btn(win, 150, 82, 64, 32, "/",   b_div)
+app.btn(win, 220, 82, 64, 32, "*",   b_mul)
+
+// Ligne 2
+app.btn(win,  10, 118, 64, 32, "7", b_7)
+app.btn(win,  80, 118, 64, 32, "8", b_8)
+app.btn(win, 150, 118, 64, 32, "9", b_9)
+app.btn(win, 220, 118, 64, 32, "-", b_sub)
+
+// Ligne 3
+app.btn(win,  10, 154, 64, 32, "4", b_4)
+app.btn(win,  80, 154, 64, 32, "5", b_5)
+app.btn(win, 150, 154, 64, 32, "6", b_6)
+app.btn(win, 220, 154, 64, 32, "+", b_add)
+
+// Ligne 4
+app.btn(win,  10, 190, 64, 32, "1", b_1)
+app.btn(win,  80, 190, 64, 32, "2", b_2)
+app.btn(win, 150, 190, 64, 32, "3", b_3)
+app.btn(win, 220, 190, 64, 68, "=", b_eq)    // = sur 2 lignes (hauteur 68)
+
+// Ligne 5
+app.btn(win,  10, 226, 134, 32, "0", b_0)    // 0 large (2 colonnes)
+app.btn(win, 150, 226,  64, 32, ".", b_dot)
+
+// ── Fonctions TEX ─────────────────────────────────────────────
+
+// Ajoute un caractère à l'expression
+func ajouter(c)
+    // Si on vient de faire =, recommencer à zéro
+    if op_faite == 1 {
+        var expr     = c
+        var op_faite = 0
+        app.set_label(lbl_result, "")
+        app.set_label(lbl_expr, expr)
+        app.label_color(lbl_expr, 0x0077AACC)
+        return
+    }
+    // Remplacer le "0" initial par le premier chiffre
+    if expr == "0" {
+        if c == "+" || c == "-" || c == "*" || c == "/" || c == "." {
+            var expr = "0" + c
+        } else {
+            var expr = c
+        }
+    } else {
+        // Limiter la longueur de l'expression
+        var n = str.len(expr)
+        if n < MAX_LEN {
+            var expr = expr + c
+        }
+    }
+    app.set_label(lbl_expr, expr)
+end
+
+// Efface le dernier caractère
+func effacer_dernier()
+    var n = str.len(expr)
+    if n > 1 {
+        var expr = str.sub(expr, 0, n - 1)
+    } else {
+        var expr = "0"
+    }
+    app.set_label(lbl_expr, expr)
+    app.label_color(lbl_expr, 0x0077AACC)
+end
+
+// Tout effacer
+func tout_effacer()
+    var expr     = "0"
+    var op_faite = 0
+    app.set_label(lbl_expr,   "0")
+    app.set_label(lbl_result, "")
+    app.label_color(lbl_expr,   0x0077AACC)
+    app.label_color(lbl_result, 0x00AAFFAA)
+end
+
+// Calcule et affiche le résultat
+// Le moteur TEX évalue les expressions arithmétiques directement.
+// On passe expr au moteur via une assignation dynamique :
+//   var res = <valeur de expr évaluée comme expression>
+// Comme TEX évalue le membre droit comme expression arithmétique,
+// on doit passer expr comme une expression à évaluer.
+// Astuce : on évalue expr en tant qu'expression TEX via math.eval.
+func calculer()
+    // Evaluer l'expression arithmétique contenue dans expr
+    // math.eval(var) lit la valeur string de var et l'évalue comme expression
+    var res = math.eval(expr)
+
+    // Détecter la division par zéro dans l'expression
+    // (le moteur retourne 0 ou inf, on vérifie via str.find)
+    var pos_div0 = str.find(expr, "/0")
+
+    if pos_div0 >= 0 {
+        // Vérifier que c'est bien "/0" seul et pas "/0.5" etc.
+        var apres = str.sub(expr, pos_div0 + 2, pos_div0 + 3)
+        if apres == "" || apres == "+" || apres == "-" || apres == "*" || apres == "/" {
+            app.set_label(lbl_result, "Erreur : /0")
+            app.label_color(lbl_result, 0x00FF4444)
+            app.label_color(lbl_expr,   0x00884444)
+            var op_faite = 1
+            return
+        }
+    }
+
+    // Convertir le résultat en chaîne et afficher
+    var res_str = str(res)
+    app.set_label(lbl_result, "= " + res_str)
+    app.label_color(lbl_result, 0x00AAFFAA)
+    app.label_color(lbl_expr,   0x00445566)   // griser l'expression
+
+    var op_faite = 1
+end
+
+// ── Boucle principale ─────────────────────────────────────────
+var run = 1
+while run == 1 {
+    app.tick()
+
+    // ── Chiffres ──────────────────────────────────────────────
+    app.btn_clicked(b_0, v) if v == 1 { ajouter("0") }
+    app.btn_clicked(b_1, v) if v == 1 { ajouter("1") }
+    app.btn_clicked(b_2, v) if v == 1 { ajouter("2") }
+    app.btn_clicked(b_3, v) if v == 1 { ajouter("3") }
+    app.btn_clicked(b_4, v) if v == 1 { ajouter("4") }
+    app.btn_clicked(b_5, v) if v == 1 { ajouter("5") }
+    app.btn_clicked(b_6, v) if v == 1 { ajouter("6") }
+    app.btn_clicked(b_7, v) if v == 1 { ajouter("7") }
+    app.btn_clicked(b_8, v) if v == 1 { ajouter("8") }
+    app.btn_clicked(b_9, v) if v == 1 { ajouter("9") }
+
+    // ── Point décimal ─────────────────────────────────────────
+    app.btn_clicked(b_dot, v) if v == 1 { ajouter(".") }
+
+    // ── Opérateurs ────────────────────────────────────────────
+    app.btn_clicked(b_add, v) if v == 1 { ajouter("+") }
+    app.btn_clicked(b_sub, v) if v == 1 { ajouter("-") }
+    app.btn_clicked(b_mul, v) if v == 1 { ajouter("*") }
+    app.btn_clicked(b_div, v) if v == 1 { ajouter("/") }
+
+    // ── Actions ───────────────────────────────────────────────
+    app.btn_clicked(b_del, v) if v == 1 { effacer_dernier() }
+    app.btn_clicked(b_c,   v) if v == 1 { tout_effacer()    }
+    app.btn_clicked(b_eq,  v) if v == 1 { calculer()        }
+
+    // Vérifier si la fenêtre est encore ouverte
+    app.running(run)
+}

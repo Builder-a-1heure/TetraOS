@@ -169,7 +169,7 @@ void vesa_boot_anim(void) {
     draw_text_centered_px(cx, (int)sh/2 - 80,
                           "TetraOS", ANIM_WHITE, 0x00000000);
     draw_text_centered_px(cx, (int)sh/2 - 56,
-                          "v1.0",    ANIM_GRAY,  0x00000000);
+                          "v1.6",    ANIM_GRAY,  0x00000000);
 
     // Rail de fond du spinner (cercle gris fixe)
     draw_ring(cx, cy, SPIN_R, DOT_R + 1, 0x00111122);

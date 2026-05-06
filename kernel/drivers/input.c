@@ -223,98 +223,141 @@ char get_input_char() {
 }
 
 // ============================================================
-// DISPATCHER CENTRALISÉ 8042
-// Principe : on lit le status register EN PREMIER et on route.
-//   bit0 = 1 : donnée disponible dans le buffer
-//   bit5 = 1 : elle vient de la souris (port auxiliaire)
-//   bit5 = 0 : elle vient du clavier
-// On ne lit JAMAIS le port 0x60 sans avoir vérifié bit5 d'abord.
+// DISPATCHER CENTRALISÉ 8042 — version robuste
+//
+// Stratégie de tri clavier vs souris :
+//   1. Lire le status byte (port 0x64)
+//   2. Si bit5=1  → donnée souris, déléguer à mouse_poll()
+//   3. Si on est en cours de réception d'un paquet souris
+//      (mouse_in_packet()==1) → continuer avec mouse_poll()
+//   4. Sinon → clavier
+//
+// Cas QEMU/VirtualBox : bit5 n'est pas toujours fiable.
+// On s'appuie donc en PRIORITÉ sur mouse_in_packet() qui suit
+// l'état interne du paquet 3-octets, et bit5 en secondaire.
+//
+// GUARD anti-fuite : si un paquet souris est en cours depuis
+// plus de N polls sans completion, on le reset (évite de
+// bouffer des octets clavier par erreur).
 // ============================================================
 
-// Traite un scancode et retourne le caractère (0 = rien / modificateur)
+// Bits du status register PS/2 (port 0x64)
+#define STATUS_OUTPUT_FULL  (1 << 0)  // Données dispo en lecture
+#define STATUS_MOUSE_DATA   (1 << 5)  // Les données viennent de la souris
+
+// Compteur de guard pour reset de paquet souris bloqué
+static int g_mouse_pkt_guard = 0;
+#define MOUSE_PKT_GUARD_MAX 8   // Max polls consécutifs en mode paquet
+
+// Traite un scancode → retourne caractère (0 = rien/modificateur)
+// VERSION CANONIQUE — utilisée partout, input.c ET appcore.c (via délégation)
 static char process_keyboard_scancode(uint8_t scancode) {
-    if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return 0; }
+    // Key-up events (bit7 = 1)
     if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return 0; }
-    if (scancode == 0x1D) { ctrl_pressed = 1;  return 0; }
-    if (scancode == 0x9D) { ctrl_pressed = 0;  return 0; }
-    if (scancode & 0x80)  return 0; // key-up
+    if (scancode == 0x9D)                      { ctrl_pressed  = 0; return 0; }
+    if (scancode & 0x80) return 0;  // tout autre key-up → ignorer
 
-    if (scancode == 0x01) return 27;
-    if (scancode == 0x0E) return '\b';
-    if (scancode == 0x48) return 16;  // ↑
-    if (scancode == 0x50) return 14;  // ↓
-    if (scancode == 0x4B) return 17;  // ←
-    if (scancode == 0x4D) return 18;  // →
+    // Modificateurs (key-down)
+    if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return 0; }
+    if (scancode == 0x1D)                      { ctrl_pressed  = 1; return 0; }
 
-    if (scancode < 256) {
+    // Touches spéciales
+    if (scancode == 0x01) return 27;   // ESC
+    if (scancode == 0x0E) return '\b'; // Backspace
+    if (scancode == 0x0F) return '\t'; // Tab
+    if (scancode == 0x1C) return '\n'; // Enter
+    if (scancode == 0x48) return 16;   // ↑
+    if (scancode == 0x50) return 14;   // ↓
+    if (scancode == 0x4B) return 17;   // ←
+    if (scancode == 0x4D) return 18;   // →
+    if (scancode == 0x49) return 11;   // Page Up   (code 11)
+    if (scancode == 0x51) return 12;   // Page Down (code 12)
+    if (scancode == 0x47) return 2;    // Home
+    if (scancode == 0x4F) return 3;    // End
+
+    // Caractères normaux
+    if (scancode < 128) {
         char c = shift_pressed ? (char)keyboard_map_shift[scancode]
                                : (char)keyboard_map[scancode];
-        if (ctrl_pressed) {
+        if (ctrl_pressed && c) {
             ctrl_pressed = 0;
-            if (c == 'c' || c == 'C') return 3;
-            if (c == 's' || c == 'S') return 19;
-            if (c == 'q' || c == 'Q') return 17;
+            // Ctrl+lettre → codes de contrôle normalisés
+            char lc = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+            if (lc == 'c') return 3;   // Ctrl+C → ETX
+            if (lc == 's') return 19;  // Ctrl+S → DC3 (sauvegarder)
+            if (lc == 'n') return 14;  // Ctrl+N → SO  (nouveau) — MÊME code que flèche bas
+            // Note : Ctrl+N = 14 = flèche bas par convention POSIX.
+            // Les apps qui ont besoin de distinguer utilisent 29 via leur propre logique.
+            if (lc == 'q') return 17;  // Ctrl+Q → DC1
+            if (lc == 'z') return 26;  // Ctrl+Z → SUB
+            if (lc >= 'a' && lc <= 'z') return (char)(lc - 'a' + 1);
             return 0;
         }
-        if (c) return c;
+        return c;
     }
     return 0;
 }
 
-// NON-BLOQUANT : retourne 0 immédiatement si aucune donnée dans le buffer.
-// Traite les paquets souris au passage.
-// À utiliser dans les boucles UI qui doivent aussi lire la souris.
+// NON-BLOQUANT : retourne 0 immédiatement si aucune donnée disponible.
+// Traite les paquets souris au passage via le callback enregistré.
+// C'est le SEUL point d'entrée vers le port 0x60 en mode UI.
 char input_poll_char(void) {
     uint8_t st;
     __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
-    if (!(st & 1)) return 0; // rien → retour immédiat
 
+    if (!(st & STATUS_OUTPUT_FULL)) {
+        // Aucune donnée — si on était en milieu de paquet, incrémenter le guard
+        if (mouse_in_packet()) {
+            g_mouse_pkt_guard++;
+            if (g_mouse_pkt_guard >= MOUSE_PKT_GUARD_MAX) {
+                // Paquet bloqué → forcer un reset via mouse_poll_reset()
+                extern void mouse_reset_packet(void);
+                mouse_reset_packet();
+                g_mouse_pkt_guard = 0;
+            }
+        } else {
+            g_mouse_pkt_guard = 0;
+        }
+        return 0;
+    }
+
+    // Donnée disponible — décider si c'est clavier ou souris :
+    // Priorité 1 : on est déjà en cours de réception d'un paquet souris
     if (mouse_in_packet()) {
-        if (mouse_poll()) on_mouse_packet_complete();
-        return 0;
-    }
-    if (st & (1 << 5)) {
+        g_mouse_pkt_guard = 0;
         if (mouse_poll()) on_mouse_packet_complete();
         return 0;
     }
 
+    // Priorité 2 : le bit5 dit explicitement que c'est de la souris
+    if (st & STATUS_MOUSE_DATA) {
+        if (mouse_poll()) on_mouse_packet_complete();
+        return 0;
+    }
+
+    // Le bit5=0 ET on n'est pas en milieu de paquet → c'est du clavier.
+    // Mais on vérifie quand même le premier octet : si bit3=1, c'est suspect
+    // (pourrait être un début de paquet souris que bit5 a raté).
     uint8_t scancode;
     __asm__ __volatile__("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
+
     return process_keyboard_scancode(scancode);
 }
 
-// BLOQUANT : boucle jusqu'à avoir une donnée (clavier ou souris).
-// Retourne 0 pour les events souris, caractère sinon.
+// BLOQUANT : boucle jusqu'à avoir un vrai caractère clavier.
 char input_dispatch_char(void) {
     while (1) {
-        uint8_t st;
-        __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
-
-        if (!(st & 1)) {
-            __asm__ __volatile__("nop");
-            continue;
-        }
-
-        if (mouse_in_packet()) {
-            if (mouse_poll()) on_mouse_packet_complete();
-            return 0;
-        }
-        if (st & (1 << 5)) {
-            if (mouse_poll()) on_mouse_packet_complete();
-            return 0;
-        }
-
-        uint8_t scancode;
-        __asm__ __volatile__("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
-        return process_keyboard_scancode(scancode);
+        char c = input_poll_char();
+        if (c) return c;
+        // Petite pause pour ne pas saturer le bus
+        __asm__ __volatile__("nop");
     }
 }
 
-// keyboard_get_char : bloque jusqu'à obtenir un vrai caractère clavier
-// (ignore les événements souris mais les traite au passage)
+// keyboard_get_char : bloque jusqu'à un vrai caractère (ignore events souris)
 char keyboard_get_char(void) {
     while (1) {
         char c = input_dispatch_char();
-        if (c != 0) return c;
+        if (c) return c;
     }
 }
