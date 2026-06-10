@@ -5,6 +5,7 @@
 #include "../gfx/screen.h"
 #include "../drivers/vesa.h"
 #include "../drivers/mouse.h"
+#include "../ui/desktop.h"
 
 // ============================================================
 // Structures internes
@@ -67,6 +68,7 @@ typedef struct {
     int    x, y, w, h;
     char   title[64];
     int    dirty;
+    int    dirty_title;      // 1 = seule la titlebar a changé (focus) — évite full redraw
     int    dragging;
     int    drag_ox, drag_oy;
     int    prev_x, prev_y;   // position au tick précédent (pour erase-on-move)
@@ -241,6 +243,32 @@ static void draw_drawarea(WinID wid, int did) {
 // ============================================================
 // Dessin fenêtre complète
 // ============================================================
+// Repeint uniquement la titlebar d'une fenêtre (changement de focus).
+// Coût : ~(w * AC_WIN_TITLE_H) pixels au lieu de w*h — typiquement 50× moins.
+static void draw_window_titlebar(WinID wid, int has_focus) {
+    Window* w = &g_wins[wid];
+    int wx = w->x, wy = w->y, ww = w->w;
+    uint32_t tc0 = has_focus ? AC_WIN_TITLE_GRAD0 : 0x00001833;
+    uint32_t tc1 = has_focus ? AC_WIN_TITLE_GRAD1 : 0x00000C1A;
+    gfx_gradient_v(wx, wy, ww, AC_WIN_TITLE_H, tc0, tc1);
+    gfx_draw_line(wx+1, wy+1, wx+ww-2, wy+1,
+                  has_focus ? 0x00224488 : 0x00111A33);
+    int tlen = str_len(w->title);
+    gfx_draw_text(wx+(ww-tlen*FONT_W)/2, wy+(AC_WIN_TITLE_H-FONT_H)/2,
+                  w->title, 0x00FFFFFF, 0);
+    int cx = wx + ww - AC_WIN_TITLE_H;
+    gfx_fill_rect(cx, wy, AC_WIN_TITLE_H, AC_WIN_TITLE_H, AC_WIN_CLOSE_BG);
+    gfx_draw_text(cx+(AC_WIN_TITLE_H-FONT_W)/2, wy+(AC_WIN_TITLE_H-FONT_H)/2,
+                  "X", 0x00FFFFFF, AC_WIN_CLOSE_BG);
+    uint32_t bdr = has_focus ? AC_WIN_BORDER_FOC : AC_WIN_BORDER;
+    gfx_draw_line(wx, wy+AC_WIN_TITLE_H, wx+ww-1, wy+AC_WIN_TITLE_H, bdr);
+    // Recalculer la bordure latérale du haut seulement
+    gfx_fill_rect(wx, wy, 1, AC_WIN_TITLE_H, bdr);
+    gfx_fill_rect(wx+ww-1, wy, 1, AC_WIN_TITLE_H, bdr);
+    gfx_fill_rect(wx, wy, ww, 1, bdr);
+    gfx_stroke_rect_blend(wx+1, wy+1, ww-2, AC_WIN_TITLE_H, 0x00AACCFF, 25);
+}
+
 static void draw_window(WinID wid, int has_focus) {
     Window* w=&g_wins[wid];
     int wx=w->x, wy=w->y, ww=w->w, wh=w->h + AC_WIN_TITLE_H;
@@ -352,7 +380,7 @@ static void redraw_label(int lid) {
 // Retourne 1 si au moins une fenêtre entière est dirty (nécessite full redraw).
 static int any_win_dirty(void) {
     for (int i=0;i<AC_MAX_WINDOWS;i++)
-        if (g_wins[i].used && g_wins[i].open && g_wins[i].dirty) return 1;
+        if (g_wins[i].used && g_wins[i].open && (g_wins[i].dirty || g_wins[i].dirty_title)) return 1;
     return 0;
 }
 
@@ -378,18 +406,27 @@ static void redraw_all(void) {
         erase_rect(w->prev_x, w->prev_y, w->w, w->h+AC_WIN_TITLE_H);
     }
 
-    // Passe 2 : redessiner toutes les fenêtres dans l'ordre Z
+    // Passe 2 : redessiner les fenêtres dans l'ordre Z.
+    // Si dirty_title seul (changement de focus, pas de move ni contenu),
+    // on ne repeint que la titlebar — 50× moins de pixels à écrire.
     WinID focus=focused_win();
     for (int i=0; i<g_zcount; i++) {
         WinID wid=g_zorder[i];
-        if (g_wins[wid].open) draw_window(wid, wid==focus);
+        if (!g_wins[wid].open) continue;
+        int title_only = g_wins[wid].dirty_title
+                      && !g_wins[wid].dirty
+                      && !g_wins[wid].moved;
+        if (title_only)
+            draw_window_titlebar(wid, wid==focus);
+        else
+            draw_window(wid, wid==focus);
     }
 
     screen_end_ui();
     mouse_draw_cursor();
 
     // Reset tous les flags dirty
-    for (int i=0;i<AC_MAX_WINDOWS;  i++) { g_wins[i].dirty=0; g_wins[i].moved=0; }
+    for (int i=0;i<AC_MAX_WINDOWS;  i++) { g_wins[i].dirty=0; g_wins[i].moved=0; g_wins[i].dirty_title=0; }
     for (int i=0;i<AC_MAX_BUTTONS;  i++) g_btns[i].dirty=0;
     for (int i=0;i<AC_MAX_LISTBOXES;i++) g_lsts[i].dirty=0;
     for (int i=0;i<AC_MAX_LABELS;   i++) g_lbls[i].dirty=0;
@@ -450,12 +487,14 @@ static void process_mouse(void) {
 
     WinID top=z_top_at(mx,my);
 
-    // Changement de focus → redraw chrome des deux fenêtres concernées
+    // Changement de focus → repeindre seulement la titlebar de chaque fenêtre.
+    // dirty_title déclenche draw_window_titlebar() au lieu de draw_window() complet
+    // → ~50× moins de pixels à écrire pour un simple clic de focus.
     if (left_down && top!=APPCORE_INVALID && top!=focused_win()) {
         z_bring_front(top);
-        // Marquer toutes les fenêtres dirty pour redraw chrome
         for (int i=0; i<AC_MAX_WINDOWS; i++)
-            if (g_wins[i].used) g_wins[i].dirty=1;
+            if (g_wins[i].used && g_wins[i].open)
+                g_wins[i].dirty_title = 1;  // titlebar seule, pas le contenu
     }
 
     WinID focus=focused_win();
@@ -575,6 +614,15 @@ void app_init(void) {
     g_zcount=0; g_prev_left=0; g_redrawn_this_tick=0;
 }
 
+// Remet appcore dans l'état initial après une session (logout).
+// Libère tous les widgets et reset le bg_callback pour éviter que le
+// callback de l'ancienne session (ex: redraw_background_rect du bureau)
+// soit appelé pendant le login suivant.
+void app_reset(void) {
+    app_init();
+    g_bg_cb = (void*)0;
+}
+
 int app_running(void) {
     for (int i=0; i<AC_MAX_WINDOWS; i++)
         if (g_wins[i].used && g_wins[i].open) return 1;
@@ -663,6 +711,7 @@ void app_close_window(WinID wid) {
     for (int i=0; i<AC_MAX_DRAWAREAS; i++) if (g_daws[i].used&&g_daws[i].win==wid) g_daws[i].used=0;
     z_remove(wid);
     for (int i=0; i<AC_MAX_WINDOWS; i++) if (g_wins[i].used) g_wins[i].dirty=1;
+    desktop_run();
 }
 
 void app_set_title(WinID wid, const char* title) {

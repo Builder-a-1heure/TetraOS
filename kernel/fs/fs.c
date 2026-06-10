@@ -56,9 +56,14 @@ int fs_acl_check(uint32_t node_idx, AclOp op) {
 
     // Si aucune session n'existe encore (premier boot), tout est permis
     if (g_session_manager.session_count == 0) return 1;
-    // Si nœud système pas encore tagué (uid SYSTEM), admin ou owner = tous
+
+    // Nœuds système (créés par fs_format ou inject_wallpaper) :
+    // - Lecture  → tout le monde (comme /etc sous Unix)
+    // - Écriture → admin seulement
+    // - Exécution → tout le monde (pour traverser les répertoires)
     if (uid == UID_SYSTEM || uid == UID_NOOWNER) {
-        return is_admin ? 1 : 0; // Seul admin accède aux nœuds système
+        if (op == ACL_WRITE) return is_admin ? 1 : 0;
+        return 1;
     }
 
     // Bit masks selon l'opération
@@ -94,6 +99,14 @@ void fs_acl_set_node(uint32_t node_idx, uint16_t perms, uint16_t uid) {
     ray64_set_meta(node, &meta);
     ray64_flush_node(node_idx);
 }
+
+uint16_t fs_get_node_uid(uint32_t node_idx) {
+    if (node_idx >= g_fs.node_count) return (uint16_t)0xFFFF; // UID_SYSTEM
+    RAY64NodeMeta meta;
+    ray64_get_meta(&g_fs.nodes[node_idx], &meta);
+    return meta.uid;
+}
+
 
 // Affiche les permissions d'un nœud de façon lisible
 void fs_acl_print(uint32_t node_idx) {
@@ -527,7 +540,11 @@ uint32_t fs_next_free_lba(void) {
     for (uint32_t i = 0; i < g_fs.node_count; i++) {
         FSNode* node = &g_fs.nodes[i];
         if (node->magic == FS_MAGIC && !node->is_dir && node->data_start_lba > 0) {
+            // Réserver au minimum 1 secteur de données même pour les fichiers vides.
+            // Sans ça, deux fichiers size=0 créés consécutivement obtiennent le même
+            // LBA (data_start_lba+1) et s'écrasent mutuellement leur FileHeader.
             uint32_t sectors = (node->size_bytes + 511) / 512;
+            if (sectors == 0) sectors = 1;
             uint32_t end = node->data_start_lba + sectors + 1; // +1 for header
             if (end > max_end) max_end = end;
         }
@@ -630,7 +647,9 @@ int fs_write_file(const char* name, const uint8_t* data, uint32_t size) {
         return -1;
     }
     
-    // Allocate LBA if needed
+    // Allouer un LBA seulement si le nœud n'en a pas encore.
+    // ray64_create_node() en alloue déjà un au moment de la création —
+    // le réallouer ici écraserait le FileHeader du fichier précédent.
     if (file->data_start_lba == 0) {
         file->data_start_lba = fs_next_free_lba();
     }

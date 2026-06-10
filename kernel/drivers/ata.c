@@ -103,7 +103,7 @@ int ata_read_single(uint32_t lba, uint8_t* buffer) {
     outb(ATA_DRIVE_SEL, 0xE0 | ((lba >> 24) & 0x0F));
     io_wait();
 
-    if (wait_bsy_clear(100000) != 0) { print_string("ATA: busy after select\n"); return -1; }
+    if (wait_bsy_clear(1000) != 0) { print_string("ATA: busy after select\n"); return -1; }
 
     outb(ATA_SECT_COUNT, 1);
     outb(ATA_LBA_LOW,  (uint8_t)(lba & 0xFF));
@@ -127,12 +127,50 @@ int ata_read_single(uint32_t lba, uint8_t* buffer) {
     return 0;
 }
 
+// Lecture multi-secteurs en une seule commande ATA (beaucoup plus rapide).
+// wait_bsy_clear est appelé UNE SEULE FOIS avant la commande — pas entre
+// chaque secteur. Sur QEMU, wait_bsy_clear(1000) = ~10ms ; ×12150 = 2min.
+// max 127 secteurs par appel (limite LBA28 sect_count sur 8 bits, 0=256).
+int ata_read_multi(uint32_t lba, uint8_t* buffer, uint8_t count) {
+    if (count == 0) return 0;
+
+    outb(ATA_DRIVE_SEL, 0xE0 | ((lba >> 24) & 0x0F));
+    io_wait();
+    // Un seul wait_bsy_clear pour toute la commande
+    if (wait_bsy_clear(1000) != 0) { print_string("ATA: busy\n"); return -1; }
+
+    outb(ATA_SECT_COUNT, count);
+    outb(ATA_LBA_LOW,  (uint8_t)(lba & 0xFF));
+    outb(ATA_LBA_MID,  (uint8_t)((lba >> 8)  & 0xFF));
+    outb(ATA_LBA_HIGH, (uint8_t)((lba >> 16) & 0xFF));
+    outb(ATA_COMMAND, 0x20); // READ SECTORS
+
+    for (int s = 0; s < (int)count; s++) {
+        // Attente DRQ pour chaque secteur — timeout court suffisant sous QEMU
+        int timeout = 10000;
+        while (--timeout) {
+            uint8_t status = inb(ATA_STATUS);
+            if (status & ATA_ERR) { print_string("ATA multi read error\n"); return -1; }
+            if (status & ATA_DRQ) break;
+        }
+        if (timeout == 0) { print_string("ATA multi timeout\n"); return -1; }
+
+        uint8_t* dst = buffer + s * 512;
+        for (int i = 0; i < 256; i++) {
+            uint16_t data = inw(ATA_DATA);
+            dst[i * 2]     = (uint8_t)(data & 0xFF);
+            dst[i * 2 + 1] = (uint8_t)(data >> 8);
+        }
+    }
+    return 0;
+}
+
 int ata_write_single(uint32_t lba, const uint8_t* buffer) {
     //print_string("+++ ATA: in ata_write_single\n");
     outb(ATA_DRIVE_SEL, 0xE0 | ((lba >> 24) & 0x0F));
     io_wait();
 
-    if (wait_bsy_clear(100000) != 0) { print_string("ATA: busy after select\n"); return -1; }
+    if (wait_bsy_clear(1000) != 0) { print_string("ATA: busy after select\n"); return -1; }
 
     outb(ATA_SECT_COUNT, 1);
     outb(ATA_LBA_LOW,  lba & 0xFF);

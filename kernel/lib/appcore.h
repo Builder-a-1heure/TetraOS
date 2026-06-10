@@ -105,6 +105,7 @@ typedef void (*AppBgCb)   (int x, int y, int w, int h);
 // API — Initialisation
 // ============================================================
 void app_init(void);
+void app_reset(void);   // reset complet apres logout (libere widgets + bg_callback)
 int  app_running(void);
 void app_tick(void);
 

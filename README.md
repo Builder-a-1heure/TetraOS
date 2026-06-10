@@ -1,28 +1,79 @@
 # TetraOS
-TetraOS est un OS barre-métal conçu par un étudiant français sur son temps libre pour s'amuser, bien que purement expérimentale et instructif, il est voué a évolué pour devenir potentiellement utilisable. Le mot clé de TetraOS est de découvrir et reproduire a ma manière le fonctionnement un system d'exploitation.
 
-Mon projet est conçu pour un processeur architecture 64x86, il fonctionne en mode 32 bits et es donc probablement compatible avec d'anciennes machines (a tester), une version arm64 est a venir mais pas tout de suite.
-J'interdit strictement toute forme de recopie a d'autre fin que l'experience personnel (j'entend par la que il est autoriser de recopier et utiliser TetraOS uniquement pour l'utilisation générique d'un OS, et la modification a des fins expérimental et non redistribuable en demandant quand meme avant sur mon discord trouvable dans ma bio ...).
+OS bare-metal x86 (i686) développé from scratch en C & ASM.
 
-# Compilation
-TetraOS n'utilise pas encore ses propres outils de compilations (qui seront intégré a l'OS plus tard dans le proejt), pour le compilé ous aurez besoin de plusieurs outils et d'une configuration partculière en fonction de votre platforme (Windows, MacOS, ou Linux).
+---
 
-Voici ci dessous les détails pour la compilation a partir des différents OS disponible pour la compilation de base.
+## Structure du projet
 
-## **Windows**
-Pour compiler TetraOS sous windows , vous avez besoin d'i686 dans le répertoire. Voici le lien pour le télécharger précompilé : [PreCompilated i686](https://github.com/lordmilko/i686-elf-tools/releases).
+```
+TetraOS/
+├── kernel/          ← Couches bas niveau
+│   ├── boot/        ← Bootloader (stage1 ASM, stage2 ASM, linker script)
+│   ├── drivers/     ← Pilotes matériels (VGA, VESA, ATA, mouse, input)
+│   ├── mem/         ← Gestion mémoire (boot allocator, PFA)
+│   ├── fs/          ← Système de fichiers custom
+│   ├── gfx/         ← Couche graphique bas niveau (screen, VESA anim, wallpaper)
+│   └── lib/         ← Runtime partagé (utils, io, appcore, boot_info, global.h)
+│
+├── os/              ← Couches hautes
+│   ├── shell/       ← Shell interactif + moteur TeX custom
+│   ├── ui/          ← Session manager + Desktop (fenêtres, curseur)
+│   └── apps/        ← Applications (fileeditor, fileman, textedit, terminal…)
+│
+├── tools/           ← Outillage
+│   ├── scripts/     ← Scripts de build et d'init (make.sh, make.bat, init*.sh…)
+│   │                   + scripts Python (generate_wallpaper.py, inject_wallpaper.py, write_lba.py)
+│   ├── build/       ← Binaires de compilation (nasm, ndisasm, i686-elf-gcc)
+│   └── assets/      ← Images source pour le wallpaper
+│
+├── os.img           ← Image disque principale (64 Mo)
+├── os.img.fs_ready  ← Flag : FS déjà formaté par le kernel
+└── TetraOSv1.6.img  ← Snapshot de release
+```
 
-Une fois le fichier i686-elf-tools-windows.zip décompressé, renommez le répertoire en **i686**.
-Les autres outils de la chaîne de compilation sous windows sont inclus dans le projet.
+---
 
-## **MacOS**
-Pour compiler sous MacOS, vous aurez besoin d'installer via HomeBrew plusieurs packages (Qemu, Nasm et i686), voici les commandes pour l'installation de ces packages :
+## Build & Run
 
-HomeBrew (si pas déja fait ...) :
-`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
+> Tous les scripts se lancent depuis la **racine** du projet.
 
-Tous les outils de la chaine :
-`brew install i686-elf-gcc i686-elf-binutils nasm qemu`
+### Prérequis (macOS)
 
-## **Linux**
-Vous êtes assé fort pour installer les outils vous même (bon j'avoue j'ai juste la flemme d'aller chercher les commandes pour chaque distrib ou pour chaque config, deso ^_^) ...
+```bash
+brew install i686-elf-gcc i686-elf-binutils nasm qemu
+```
+
+### Commandes
+
+```bash
+# Compiler et lancer dans QEMU
+bash tools/scripts/make.sh
+
+# Compiler seulement (sans lancer QEMU)
+bash tools/scripts/make.sh --no-run
+
+# Forcer la recréation de os.img (efface le FS)
+bash tools/scripts/make.sh --fresh
+
+# Afficher le détail des fichiers compilés
+bash tools/scripts/make.sh --verbose
+```
+
+### Première utilisation
+
+1. `bash tools/scripts/make.sh`  → crée os.img et lance QEMU
+2. Laisser le kernel démarrer une fois (il formate le FS)
+3. Quitter QEMU, puis `bash tools/scripts/make.sh --no-run` → injecte le wallpaper
+
+---
+
+## Wallpaper
+
+```bash
+# Générer wallpaper.bin depuis une image JPEG/PNG
+python3 tools/scripts/generate_wallpaper.py tools/assets/background.jpg
+
+# L'injecter manuellement dans os.img
+python3 tools/scripts/inject_wallpaper.py os.img kernel/gfx/wallpaper.bin
+```

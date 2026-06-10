@@ -67,6 +67,10 @@ void vesa_invalidate_cell(int col, int row);
 // Invalide tout le dirty buffer — force un redraw complet au prochain render
 void vesa_invalidate_all(void);
 
+// Marque toutes les cellules comme propres — render_vesa() ne retouche rien.
+// Utilisé par screen_begin_ui() pour protéger le wallpaper du bureau.
+void vesa_invalidate_none(void);
+
 // Invalide les cellules couvertes par un rectangle pixel — à appeler après
 // tout write direct dans le framebuffer (gfx_fill_rect, curseur, etc.)
 void vesa_invalidate_rect(int x, int y, int w, int h);

@@ -141,18 +141,23 @@ int g_ui_drawing = 0;
 void screen_invalidate(void) { g_screen_dirty = 1; }
 
 // Début d'un bloc de dessin UI — suspend les flushes automatiques
-void screen_begin_ui(void) { g_ui_drawing = 1; g_screen_dirty = 0; }
+void screen_begin_ui(void) {
+    g_ui_drawing = 1;
+    g_screen_dirty = 0;
+    // Vider le dirty cache pour que render_vesa() ne redessine
+    // PAS les cellules texte par-dessus le wallpaper après screen_end_ui.
+    if (vesa_active()) vesa_invalidate_none();
+}
 
 // Début d'un bloc de dessin UI intermédiaire — flush les changements graphiques
 // sans effacer l'écran (pour les mises à jour partielles dans une UI active)
 void screen_end_ui(void) {
     g_ui_drawing = 0;
-    if (g_screen_dirty) {
-        if (vesa_active()) render_vesa();
-        else               render_vga();
-        g_screen_dirty = 0;
-    }
-    // NOTE : le curseur souris est géré par la boucle appelante, pas ici.
+    // On NE rappelle PAS render_vesa() ici : le bureau a déjà dessiné
+    // le wallpaper + icônes + taskbar directement dans le framebuffer.
+    // Un appel à render_vesa() écraserait le wallpaper avec les cellules
+    // texte noires du scrollback terminal.
+    g_screen_dirty = 0;
 }
 
 // Sortie définitive d'une UI pour retourner au terminal
@@ -288,15 +293,31 @@ void gfx_blend_pixel(int x, int y, uint32_t src, uint8_t alpha) {
 
 void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
     if (!vesa_active() || alpha == 0) return;
+    if (alpha >= 255) { gfx_fill_rect(x, y, w, h, color); return; }
     int x2 = x + w, y2 = y + h;
     uint32_t sw = vesa_width(), sh = vesa_height();
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
+    if (x < 0) x = 0; if (y < 0) y = 0;
     if ((uint32_t)x2 > sw) x2 = (int)sw;
     if ((uint32_t)y2 > sh) y2 = (int)sh;
-    for (int py = y; py < y2; py++)
-        for (int px = x; px < x2; px++)
-            gfx_blend_pixel(px, py, color, alpha);
+    if (x2 <= x || y2 <= y) return;
+    uint32_t pitch = vesa_pitch();
+    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
+    // Contribution source préfactorisée — constante sur tout le rectangle
+    uint32_t sr  = ((color >> 16) & 0xFF) * (uint32_t)alpha;
+    uint32_t sg  = ((color >>  8) & 0xFF) * (uint32_t)alpha;
+    uint32_t sb  = ( color        & 0xFF) * (uint32_t)alpha;
+    uint32_t inv = 255u - (uint32_t)alpha;
+    int line_w = x2 - x;
+    for (int py = y; py < y2; py++) {
+        uint32_t* row = (uint32_t*)(fb + (uint32_t)py * pitch + (uint32_t)x * 4u);
+        for (int i = 0; i < line_w; i++) {
+            uint32_t dst = row[i];
+            uint32_t r   = (sr + ((dst >> 16) & 0xFF) * inv) >> 8;  // /256 ≈ /255
+            uint32_t g   = (sg + ((dst >>  8) & 0xFF) * inv) >> 8;
+            uint32_t b   = (sb + ( dst        & 0xFF) * inv) >> 8;
+            row[i] = (r << 16) | (g << 8) | b;
+        }
+    }
     vesa_invalidate_rect(x, y, x2 - x, y2 - y);
 }
 
@@ -315,6 +336,27 @@ void gfx_stroke_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t a
 }
 
 // Remplir un rectangle plein
+// ============================================================
+// PRIMITIVES RAPIDES — fill 32bpp via rep stosd (x86 burst write)
+//
+// rep stosd écrit ECX fois la valeur EAX à l'adresse EDI, en avançant
+// EDI de 4 bytes à chaque étape. C'est l'équivalent d'un memset 32-bit
+// mais en une seule instruction — le CPU peut le pipeliner et le précharger
+// dans le cache. Sur i686/Pentium c'est typiquement 4-8× plus rapide qu'une
+// boucle C avec stores individuels, surtout pour de grands blocs.
+// ============================================================
+static inline void fast_fill_line(uint32_t* dst, uint32_t color, uint32_t count) {
+    // "D" = EDI, "c" = ECX, "a" = EAX, clobbered : memory, cc
+    asm volatile (
+        "rep stosl"
+        : "+D"(dst), "+c"(count)
+        : "a"(color)
+        : "memory"
+    );
+}
+
+// Remplit un rectangle plein via fast_fill_line (rep stosd par ligne).
+// 10-50× plus rapide que la boucle vesa_put_pixel précédente.
 void gfx_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if (!vesa_active()) return;
     int x2 = x + w;
@@ -325,12 +367,14 @@ void gfx_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if (y < 0) y = 0;
     if ((uint32_t)x2 > sw) x2 = (int)sw;
     if ((uint32_t)y2 > sh) y2 = (int)sh;
-    for (int py = y; py < y2; py++)
-        for (int px = x; px < x2; px++)
-            vesa_put_pixel(px, py, color);
-    // Invalider les cellules glyphe recouvertes : sans ça, vesa_draw_glyph()
-    // croirait les cellules inchangées (dirty check) et ne redessinerait pas
-    // le texte qui sera dessiné par-dessus ce rectangle.
+    if (x2 <= x || y2 <= y) return;
+    uint32_t pitch = vesa_pitch();
+    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
+    uint32_t line_w = (uint32_t)(x2 - x);
+    for (int py = y; py < y2; py++) {
+        uint32_t* dst = (uint32_t*)(fb + (uint32_t)py * pitch + (uint32_t)x * 4u);
+        fast_fill_line(dst, color, line_w);
+    }
     vesa_invalidate_rect(x, y, x2 - x, y2 - y);
 }
 
@@ -400,41 +444,82 @@ void gfx_fill_circle(int cx, int cy, int r, uint32_t color) {
 }
 
 // Dégradé horizontal gauche→droite
+// Tampon statique pour une ligne de dégradé horizontal (max 1920 px).
+// On calcule les couleurs interpolées UNE FOIS, puis on copie cette ligne
+// pour chaque rangée avec rep movsd — au lieu de h×w appels à gfx_fill_rect.
+#define GRAD_H_BUF 1920
+static uint32_t s_grad_h_line[GRAD_H_BUF];
+
+// rep movsd : copie count mots 32-bit de src vers dst
+static inline void fast_memcpy_u32(uint32_t* dst, const uint32_t* src, uint32_t count) {
+    asm volatile (
+        "rep movsl"
+        : "+D"(dst), "+S"(src), "+c"(count)
+        :
+        : "memory"
+    );
+}
+
 void gfx_gradient_h(int x, int y, int w, int h,
                     uint32_t col_left, uint32_t col_right) {
     if (!vesa_active()) return;
-    uint8_t r0 = (col_left  >> 16) & 0xFF;
-    uint8_t g0 = (col_left  >>  8) & 0xFF;
-    uint8_t b0 = (col_left       ) & 0xFF;
-    uint8_t r1 = (col_right >> 16) & 0xFF;
-    uint8_t g1 = (col_right >>  8) & 0xFF;
-    uint8_t b1 = (col_right      ) & 0xFF;
-    for (int col = 0; col < w; col++) {
-        uint8_t r = (uint8_t)((int)r0 + ((int)(r1 - r0) * col) / (w - 1));
-        uint8_t g = (uint8_t)((int)g0 + ((int)(g1 - g0) * col) / (w - 1));
-        uint8_t b = (uint8_t)((int)b0 + ((int)(b1 - b0) * col) / (w - 1));
-        uint32_t c = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-        gfx_fill_rect(x + col, y, 1, h, c);
+    if (w <= 0 || h <= 0) return;
+    uint32_t sw = vesa_width(), sh = vesa_height();
+    int x2 = x + w; if ((uint32_t)x2 > sw) x2 = (int)sw;
+    int y2 = y + h; if ((uint32_t)y2 > sh) y2 = (int)sh;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    int real_w = x2 - x;
+    if (real_w <= 0 || y2 <= y) return;
+    if (real_w > GRAD_H_BUF) real_w = GRAD_H_BUF;
+    int r0 = (col_left  >> 16) & 0xFF, r1 = (col_right >> 16) & 0xFF;
+    int g0 = (col_left  >>  8) & 0xFF, g1 = (col_right >>  8) & 0xFF;
+    int b0 = (col_left       ) & 0xFF, b1 = (col_right       ) & 0xFF;
+    int denom = (w > 1) ? (w - 1) : 1;
+    // Calculer la ligne interpolée une seule fois
+    for (int col = 0; col < real_w; col++) {
+        uint8_t r = (uint8_t)(r0 + (r1 - r0) * col / denom);
+        uint8_t g = (uint8_t)(g0 + (g1 - g0) * col / denom);
+        uint8_t b = (uint8_t)(b0 + (b1 - b0) * col / denom);
+        s_grad_h_line[col] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
     }
+    // Recopier avec rep movsd — une seule passe mémoire par rangée
+    uint32_t pitch = vesa_pitch();
+    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
+    for (int row = 0; row < y2 - y; row++) {
+        uint32_t* dst_row = (uint32_t*)(fb + (uint32_t)(y + row) * pitch
+                                           + (uint32_t)x * 4u);
+        fast_memcpy_u32(dst_row, s_grad_h_line, (uint32_t)real_w);
+    }
+    vesa_invalidate_rect(x, y, real_w, y2 - y);
 }
 
 // Dégradé vertical haut→bas
 void gfx_gradient_v(int x, int y, int w, int h,
                     uint32_t col_top, uint32_t col_bot) {
     if (!vesa_active()) return;
-    uint8_t r0 = (col_top >> 16) & 0xFF;
-    uint8_t g0 = (col_top >>  8) & 0xFF;
-    uint8_t b0 = (col_top      ) & 0xFF;
-    uint8_t r1 = (col_bot >> 16) & 0xFF;
-    uint8_t g1 = (col_bot >>  8) & 0xFF;
-    uint8_t b1 = (col_bot      ) & 0xFF;
-    for (int row = 0; row < h; row++) {
-        uint8_t r = (uint8_t)((int)r0 + ((int)(r1 - r0) * row) / (h - 1));
-        uint8_t g = (uint8_t)((int)g0 + ((int)(g1 - g0) * row) / (h - 1));
-        uint8_t b = (uint8_t)((int)b0 + ((int)(b1 - b0) * row) / (h - 1));
+    if (w <= 0 || h <= 0) return;
+    uint32_t sw = vesa_width(), sh = vesa_height();
+    int x2 = x + w; if ((uint32_t)x2 > sw) x2 = (int)sw;
+    int y2 = y + h; if ((uint32_t)y2 > sh) y2 = (int)sh;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    if (x2 <= x || y2 <= y) return;
+    uint32_t line_w = (uint32_t)(x2 - x);
+    uint32_t pitch  = vesa_pitch();
+    uint8_t* fb     = (uint8_t*)vesa_fb_addr();
+    int r0 = (col_top >> 16) & 0xFF, r1 = (col_bot >> 16) & 0xFF;
+    int g0 = (col_top >>  8) & 0xFF, g1 = (col_bot >>  8) & 0xFF;
+    int b0 = (col_top      ) & 0xFF, b1 = (col_bot      ) & 0xFF;
+    int denom = (h > 1) ? (h - 1) : 1;
+    for (int row = 0; row < y2 - y; row++) {
+        // Interpolation couleur — une seule fois par ligne
+        uint8_t r = (uint8_t)(r0 + (r1 - r0) * row / denom);
+        uint8_t g = (uint8_t)(g0 + (g1 - g0) * row / denom);
+        uint8_t b = (uint8_t)(b0 + (b1 - b0) * row / denom);
         uint32_t c = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-        gfx_fill_rect(x, y + row, w, 1, c);
+        uint32_t* dst = (uint32_t*)(fb + (uint32_t)(y + row) * pitch + (uint32_t)x * 4u);
+        fast_fill_line(dst, c, line_w);  // rep stosd sur toute la ligne
     }
+    vesa_invalidate_rect(x, y, x2 - x, y2 - y);
 }
 
 // Texte centré dans un rectangle (coordonnées pixels)

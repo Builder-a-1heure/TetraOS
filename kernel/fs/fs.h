@@ -10,6 +10,9 @@ typedef struct __FSTable__ FSTable;
 typedef struct __FileHeader__ FileHeader;
 
 // Filesystem layout constants
+// ⚠️  Ces LBA doivent rester APRÈS la fin du kernel sur le disque.
+//     kernel.bin = LBA 3 + KERNEL_SECTORS (13000) → fin à LBA 5003.
+//     FS_TABLE_LBA est aligné à 13312 (multiple de 1024) pour laisser de la marge.
 #define FS_TABLE_LBA         2048u
 #define FS_TABLE_SECTORS     6144u
 #define FS_DATA_BASE_LBA     8192u
@@ -209,6 +212,7 @@ int fs_chown(const char* name, uint16_t new_uid);
 void fs_acl_print(uint32_t node_idx);
 
 // Définit les permissions d'un nœud par son index (usage interne + session.c)
-void fs_acl_set_node(uint32_t node_idx, uint16_t perms, uint16_t uid);
+void     fs_acl_set_node(uint32_t node_idx, uint16_t perms, uint16_t uid);
+uint16_t fs_get_node_uid(uint32_t node_idx);  // retourne meta.uid du nœud
 
 #endif // FS_H

@@ -292,7 +292,7 @@ init_pm:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, 0x600000
+    mov esp, 0xA00000
 
     ; Scanner DEADBEEF de 0x10000 à 0x32000
     mov edi, 0x10000
@@ -345,7 +345,10 @@ init_pm:
     hlt
 
 LBA_START      equ 3
+; KERNEL_SECTORS peut être surchargé par make.sh via : nasm -D KERNEL_SECTORS=4000
+%ifndef KERNEL_SECTORS
 KERNEL_SECTORS equ 500
+%endif
 CHUNK          equ 64
 
 times 1024 - ($ - $$) db 0

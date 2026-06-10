@@ -1,8 +1,0 @@
-{
-    "files.associations": {
-        "utils.h": "c",
-        "ata.h": "c",
-        "screen.h": "c",
-        "input.h": "c"
-    }
-}

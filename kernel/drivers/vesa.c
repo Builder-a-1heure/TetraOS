@@ -13,6 +13,12 @@ static uint32_t g_height      = 0;
 static uint8_t  g_bpp         = 0;
 static uint32_t g_bpp_bytes   = 0;
 
+// Quand activé, draw_glyph_raw ne peint PAS les pixels de fond (bg) —
+// le wallpaper reste visible derrière le texte.
+// Activé par vesa_set_transparent_bg(1) au démarrage du bureau.
+static int g_transparent_bg   = 0;
+void vesa_set_transparent_bg(int on) { g_transparent_bg = on; }
+
 int vesa_active(void)       { return g_vesa_active; }
 uint32_t vesa_width(void)   { return g_width;   }
 uint32_t vesa_height(void)  { return g_height;  }
@@ -61,6 +67,19 @@ static void dirty_reset(void) {
     g_dirty_init = 1;
 }
 
+// Marque toutes les cellules comme "propres" → le prochain render_vesa()
+// ne redessinera rien. Utilisé par screen_begin_ui() pour empêcher que
+// render_vesa() écrase le wallpaper avec les cellules texte du scrollback.
+static void dirty_clear(void) {
+    if (!g_dirty_init) dirty_reset();
+    for (int r = 0; r < DIRTY_ROWS; r++)
+        for (int c = 0; c < DIRTY_COLS; c++)
+            g_drawn[r][c].ch = ' ';  // espace = rien à redessiner
+    g_dirty_init = 1;
+}
+
+void vesa_invalidate_none(void) { dirty_clear(); }
+
 // ============================================================
 // Écriture directe d'un pixel 32bpp (inline pour perf)
 // ============================================================
@@ -80,14 +99,27 @@ static void draw_glyph_raw(int px, int py, char c, uint32_t fg, uint32_t bg) {
             if ((uint32_t)y >= g_height) break;
             uint32_t* line = (uint32_t*)((uint8_t*)g_fb_addr + (uint32_t)y * g_pitch + (uint32_t)px * 4);
             uint8_t bits = glyph[row];
-            line[0] = (bits & 0x80) ? fg : bg;
-            line[1] = (bits & 0x40) ? fg : bg;
-            line[2] = (bits & 0x20) ? fg : bg;
-            line[3] = (bits & 0x10) ? fg : bg;
-            line[4] = (bits & 0x08) ? fg : bg;
-            line[5] = (bits & 0x04) ? fg : bg;
-            line[6] = (bits & 0x02) ? fg : bg;
-            line[7] = (bits & 0x01) ? fg : bg;
+            if (g_transparent_bg) {
+                // Mode bureau : ne peindre que les pixels FG (texte),
+                // laisser le wallpaper intact sur les pixels de fond.
+                if (bits & 0x80) line[0] = fg;
+                if (bits & 0x40) line[1] = fg;
+                if (bits & 0x20) line[2] = fg;
+                if (bits & 0x10) line[3] = fg;
+                if (bits & 0x08) line[4] = fg;
+                if (bits & 0x04) line[5] = fg;
+                if (bits & 0x02) line[6] = fg;
+                if (bits & 0x01) line[7] = fg;
+            } else {
+                line[0] = (bits & 0x80) ? fg : bg;
+                line[1] = (bits & 0x40) ? fg : bg;
+                line[2] = (bits & 0x20) ? fg : bg;
+                line[3] = (bits & 0x10) ? fg : bg;
+                line[4] = (bits & 0x08) ? fg : bg;
+                line[5] = (bits & 0x04) ? fg : bg;
+                line[6] = (bits & 0x02) ? fg : bg;
+                line[7] = (bits & 0x01) ? fg : bg;
+            }
         }
     } else {
         // 24bpp / 16bpp
