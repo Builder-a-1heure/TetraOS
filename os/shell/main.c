@@ -28,7 +28,13 @@
 __attribute__((naked)) __attribute__((section(".text.start")))
 void start(void) {
     asm volatile (
-        "mov $0xA00000, %esp\n"
+        // CORRECTION : stack remonté de 0xA00000 (10 Mo) à 0x3000000 (48 Mo).
+        // Le backbuffer VESA_BB_W*H (désormais 1920x1080x4 = 8,3 Mo de BSS,
+        // voir vesa.h) faisait dépasser le kernel au-delà de 10 Mo et
+        // rentrait en collision avec l'ancien stack. VM allouée à 64 Mo
+        // (-m 64M dans les scripts) → 48 Mo laisse ~16 Mo de marge stack
+        // avant la fin de la RAM, largement suffisant.
+        "mov $0x3000000, %esp\n"
         "mov %esp, %ebp\n"
         "mov $0x10, %ax\n"
         "mov %ax, %ds\n"

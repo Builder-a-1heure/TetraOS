@@ -66,12 +66,11 @@ static FSNode* find_wallpaper_node(void) {
 // du suivant) grâce à un registre de débordement de 2 bytes.
 // ============================================================
 static void blit_sectors(uint32_t sector_offset, uint32_t sector_count) {
-    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
-    uint32_t pitch = vesa_pitch();
+    uint32_t* bb   = vesa_backbuf();
     uint32_t sw    = vesa_width();
     uint32_t sh    = vesa_height();
 
-    if (!fb || !pitch || !sw || !sh) return;
+    if (!bb || !sw || !sh) return;
 
     // Position pixel globale correspondant au début du premier secteur lu.
     // sector_offset * 512 bytes / 3 bytes per pixel
@@ -114,13 +113,12 @@ static void blit_sectors(uint32_t sector_offset, uint32_t sector_count) {
                 uint32_t img_y = px_idx / WALLPAPER_W;
 
                 // On ne blit que si le pixel est dans les limites du framebuffer
-                if (img_x < sw && img_y < sh) {
-                    // partial[0]=R, partial[1]=G, partial[2]=B → BGRA32 dans le fb
+                if (img_x < sw && img_y < sh
+                        && img_x < VESA_BB_W && img_y < VESA_BB_H) {
                     uint32_t color = ((uint32_t)partial[0] << 16)
                                    | ((uint32_t)partial[1] <<  8)
                                    |  (uint32_t)partial[2];
-                    uint32_t* fb_px = (uint32_t*)(fb + img_y * pitch + img_x * 4u);
-                    *fb_px = color;
+                    bb[img_y * VESA_BB_W + img_x] = color;
                 }
 
                 px_idx++;
@@ -197,11 +195,10 @@ void wallpaper_blit_rect(int x, int y, int w, int h) {
         return;
     }
 
-    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
-    uint32_t pitch = vesa_pitch();
+    uint32_t* bb   = vesa_backbuf();
     uint32_t sw    = vesa_width();
     uint32_t sh    = vesa_height();
-    if (!fb || !pitch) return;
+    if (!bb) return;
 
     // Clamp au framebuffer
     int x2 = x + w; if (x2 > (int)sw) x2 = (int)sw;
@@ -248,12 +245,12 @@ void wallpaper_blit_rect(int x, int y, int w, int h) {
 
                     // N'écrire que les pixels de la colonne demandée
                     if ((int)img_y == py && (int)img_x >= x && (int)img_x < x2
-                            && img_x < sw && img_y < sh) {
+                            && img_x < sw && img_y < sh
+                            && img_x < VESA_BB_W && img_y < VESA_BB_H) {
                         uint32_t color = ((uint32_t)partial[0] << 16)
                                        | ((uint32_t)partial[1] <<  8)
                                        |  (uint32_t)partial[2];
-                        uint32_t* fb_px = (uint32_t*)(fb + img_y * pitch + img_x * 4u);
-                        *fb_px = color;
+                        bb[img_y * VESA_BB_W + img_x] = color;
                     }
 
                     px_idx++;

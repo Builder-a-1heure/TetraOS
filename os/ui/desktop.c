@@ -22,6 +22,7 @@
 #include "../ui/session.h"
 #include "../lib/utils.h"
 #include "../lib/appcore.h"
+#include "../lib/process.h"
 #include "../apps/app.h"
 #include "../gfx/wallpaper.h"
 #include <stdint.h>
@@ -403,14 +404,35 @@ static void desktop_redraw(void) {
         g_icons[i].hovered = icon_hit(i, g_mouse.x, g_mouse.y);
     draw_all_icons();
     screen_end_ui();
+    vesa_flip();
+}
+
+// ============================================================
+// Handler de paquet souris pour la boucle desktop
+// ============================================================
+// On NE dessine PAS le curseur ici (desktop_run gère lui-même
+// erase/redraw en fonction du hover des icônes). On se contente
+// de signaler qu'un mouvement/clic a eu lieu.
+static volatile int s_desktop_mouse_pending = 0;
+static void desktop_on_mouse_packet(void) {
+    s_desktop_mouse_pending = 1;
 }
 
 // ============================================================
 // Lancement d'une app
 // ============================================================
 static void launch_app(int idx) {
+    // Snapshot du contexte session → ProcessContext avant d'entrer dans l'app.
+    // Toutes les vérifications ACL/permissions de l'app liront g_current_process
+    // plutôt que g_session_manager directement.
+    process_begin();
     mouse_erase_cursor();
     g_icons[idx].hdr->entry();
+    process_end();
+    // Restaurer le handler souris du bureau : l'app quittée (terminal, etc.)
+    // a pu enregistrer le sien via input_set_mouse_packet_handler() et ne
+    // le désenregistre pas forcément à la sortie.
+    input_set_mouse_packet_handler(desktop_on_mouse_packet);
     // Retour ici après fermeture de l'app.
     // Si l'app a déclenché un logout (ex: terminal → session.logout),
     // logged_in=0 : ne pas redessiner le bureau — desktop_run va sortir
@@ -442,10 +464,21 @@ void desktop_run(void) {
     desktop_redraw();
     mouse_draw_cursor();
 
+    // IMPORTANT : on route tout par input_poll_char() (dispatcher centralisé
+    // de input.c), jamais par mouse_poll() en direct. mouse_poll() lit
+    // aveuglément le premier octet disponible sur le port 0x60 — s'il
+    // s'agit en fait d'un scancode clavier, ça désynchronise le paquet
+    // souris 3-octets et fait dérailler le curseur (bug historique).
+    input_set_mouse_packet_handler(desktop_on_mouse_packet);
+
     while (g_session_manager.logged_in) {
 
         int mouse_moved = 0;
-        while (mouse_poll()) mouse_moved = 1;
+        s_desktop_mouse_pending = 0;
+        while (input_has_pending_byte()) {
+            input_poll_char(); // route vers clavier ou mouse_poll() selon le status byte
+        }
+        if (s_desktop_mouse_pending) mouse_moved = 1;
 
         int cur_left  = g_mouse.btn_left;
         int prev_left = g_prev_left;
@@ -503,6 +536,10 @@ void desktop_run(void) {
     }
 
 desktop_exit:
+    // Retour au handler par défaut (efface/redessine le curseur) pour
+    // le prochain écran de login — sinon il resterait branché sur
+    // desktop_on_mouse_packet() qui ne dessine plus rien.
+    input_set_mouse_packet_handler(NULL);
     // Fermer toutes les fenêtres appcore avant de rendre la main à main.c.
     // Sans ça, les widgets de l'ancienne session restent alloués et peuvent
     // déclencher des redraws parasites au premier app_tick() de la session suivante.

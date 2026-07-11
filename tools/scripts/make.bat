@@ -138,6 +138,14 @@ echo   lib\boot_info.c
 %GCC% %CFLAGS% -c kernel\lib\boot_info.c  -o %OBJ%\boot_info.o
 if errorlevel 1 goto error
 
+echo   lib\process.c
+%GCC% %CFLAGS% -c kernel\lib\process.c    -o %OBJ%\process.o
+if errorlevel 1 goto error
+
+echo   lib\errwin.c
+%GCC% %CFLAGS% -c kernel\lib\errwin.c     -o %OBJ%\errwin.o
+if errorlevel 1 goto error
+
 REM === LINKAGE ===
 echo [5/7] Linkage du kernel...
 %LD% -T kernel\boot\linker.ld -o kernel.elf -Map kernel.map ^
@@ -158,7 +166,9 @@ echo [5/7] Linkage du kernel...
     %OBJ%\mem_boot.o ^
     %OBJ%\pfa.o ^
     %OBJ%\utils.o ^
-    %OBJ%\boot_info.o
+    %OBJ%\boot_info.o ^
+    %OBJ%\process.o ^
+    %OBJ%\errwin.o
 if errorlevel 1 goto error
 
 REM === EXTRACTION DU BINAIRE PUR ===

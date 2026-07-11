@@ -84,6 +84,23 @@ void vesa_clear_glyph(int col, int row, uint32_t bg);
 // Remplir tout l'écran d'une couleur
 void vesa_fill(uint32_t color);
 
+// Dimensions du backbuffer (fixées à la compilation)
+// CORRECTION : alignées sur la résolution réelle négociée par stage2 (1920x1080).
+// Avant : 800x600, ce qui tronquait silencieusement tout le rendu graphique
+// (wallpaper, icônes, curseur souris) au-delà de x=800/y=600 — le bureau
+// n'affichait le fond que dans un coin, et le curseur (initialisé au centre
+// de l'écran, x=960) était carrément invisible.
+// Voir main.c:start() — le stack pointer a été remonté à 0x3000000 (48 Mo)
+// pour laisser la place à ce backbuffer bien plus gros (~8,3 Mo de BSS).
+#define VESA_BB_W 1920
+#define VESA_BB_H 1080
+
+// Backbuffer — double buffering logiciel
+// Toutes les primitives écrivent dans le backbuffer.
+// Appeler vesa_flip() une fois par frame pour blit vers le framebuffer physique.
+uint32_t* vesa_backbuf(void);
+void      vesa_flip(void);
+
 // Nombre de colonnes et lignes texte disponibles en VESA
 int vesa_text_cols(void);
 int vesa_text_rows(void);

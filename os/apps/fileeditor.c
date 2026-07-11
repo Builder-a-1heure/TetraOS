@@ -17,7 +17,10 @@
 #include "fileeditor.h"
 #include "../lib/appcore.h"
 #include "../lib/utils.h"
+#include "../lib/process.h"
+#include "../lib/errwin.h"
 #include "../fs/fs.h"
+#include "../ui/session.h"
 #include "../gfx/screen.h"
 #include "../drivers/vesa.h"
 #include "../drivers/mouse.h"
@@ -263,6 +266,18 @@ static void fe_ensure_scroll(void) {
 // ============================================================
 static int fe_save(void) {
     if (!g_fe.filename[0]) return 0;
+
+    if (!session_has_permission(PERM_FS_WRITE)) {
+        errwin_error("Sauvegarde refusee", "Permission insuffisante.\nVotre session n'a pas le droit d'ecriture.");
+        return 0;
+    }
+
+    int node_idx = fs_find(g_fe.filename);
+    if (node_idx >= 0 && !fs_acl_check((uint32_t)node_idx, ACL_WRITE)) {
+        errwin_error2("Acces refuse", "Ecriture interdite sur : ", g_fe.filename);
+        return 0;
+    }
+
     // Pour les modes texte/code, sauvegarder text[]
     // Pour hex, sauvegarder raw[]
     if (g_fe.mode == MODE_HEX) {
@@ -277,6 +292,16 @@ static int fe_save(void) {
 }
 
 static void fe_load(const char* filename) {
+    if (!session_has_permission(PERM_FS_READ)) {
+        errwin_error("Lecture refusee", "Permission insuffisante.\nVotre session n'a pas le droit de lecture.");
+        return;
+    }
+    int node_idx = fs_find(filename);
+    if (node_idx >= 0 && !fs_acl_check((uint32_t)node_idx, ACL_READ)) {
+        errwin_error2("Acces refuse", "Lecture interdite sur : ", filename);
+        return;
+    }
+
     fe_strcpy(g_fe.filename, filename, FE_FILENAME_MAX+1);
     g_fe.len=0; g_fe.cursor=0; g_fe.scroll_line=0;
     g_fe.modified=0; g_fe.grid_scroll_row=0;

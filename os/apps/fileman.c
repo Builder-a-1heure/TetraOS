@@ -18,6 +18,7 @@
 #include "fileeditor.h"
 #include "../lib/appcore.h"
 #include "../lib/utils.h"
+#include "../lib/errwin.h"
 #include "../fs/fs.h"
 #include "../ui/session.h"
 #include "../drivers/vesa.h"
@@ -170,8 +171,7 @@ static void fm_open_file(const char* name, LblID lbl_status) {
     FmAppType t = fm_app_for(name);
     if (t == FMAPP_TEX_RUN) {
         if (!session_has_permission(PERM_TEX_EXECUTE)) {
-            app_set_label_text(lbl_status, "Permission refusee : execution .tex");
-            app_set_label_color(lbl_status, FM_STATUS_ERR);
+            errwin_error("Permission refusee", "Execution de scripts .tex\nnon autorisee pour cette session.");
         } else {
             extern int tex_execute(const char*);
             tex_execute(name);
@@ -183,8 +183,7 @@ static void fm_open_file(const char* name, LblID lbl_status) {
         app_set_label_color(lbl_status, FM_STATUS_WARN);
     } else {
         if (!session_has_permission(PERM_FS_READ)) {
-            app_set_label_text(lbl_status, "Permission refusee : lecture.");
-            app_set_label_color(lbl_status, FM_STATUS_ERR);
+            errwin_error("Permission refusee", "Lecture de fichiers\nnon autorisee pour cette session.");
         } else {
             app_fileeditor_run(name);
         }
@@ -295,8 +294,7 @@ static void fm_navigate_to(uint32_t new_dir, LstID lst,
         // Refus réel : restaurer l'état précédent
         g_fm.dir_idx = prev_dir;
         g_cwd = prev_dir;
-        app_set_label_text(lbl_status, "Acces refuse (permissions insuffisantes).");
-        app_set_label_color(lbl_status, FM_STATUS_ERR);
+        errwin_error("Acces refuse", "Permissions insuffisantes\npour naviguer dans ce dossier.");
         return;
     }
     fm_build_path(new_dir, g_fm.path, FM_PATH_MAX);
@@ -498,7 +496,8 @@ static void fm_dialog_chown(const char* name, LblID lbl_status) {
 // ============================================================
 static void fm_do_rename(const char* old_name, LstID lst, LblID lbl_status) {
     if (!session_has_permission(PERM_FS_WRITE)) {
-        app_set_label_text(lbl_status, "Permission refusee : ecriture."); app_set_label_color(lbl_status, FM_STATUS_ERR); return;
+        errwin_error("Permission refusee", "Renommage non autorise\npour cette session.");
+        return;
     }
     char new_name[FM_NAME_MAX]; new_name[0] = '\0';
     char prompt[80]; prompt[0] = '\0';
@@ -518,7 +517,7 @@ static void fm_do_rename(const char* old_name, LstID lst, LblID lbl_status) {
     int ni = fs_find(old_name);
     if (ni >= 0 && (uint32_t)ni < g_fs.node_count) {
         if (!fs_acl_check((uint32_t)ni, ACL_WRITE)) {
-            app_set_label_text(lbl_status, "Acces refuse (ACL)."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+            errwin_error2("Acces refuse", "Ecriture interdite sur : ", old_name);
             g_cwd = saved_cwd; return;
         }
         // Modifier le nom directement dans la structure FS
@@ -540,7 +539,8 @@ static void fm_do_rename(const char* old_name, LstID lst, LblID lbl_status) {
 // ============================================================
 static void fm_do_copy(const char* name, LblID lbl_status) {
     if (!session_has_permission(PERM_FS_READ)) {
-        app_set_label_text(lbl_status, "Permission refusee : lecture."); app_set_label_color(lbl_status, FM_STATUS_ERR); return;
+        errwin_error("Permission refusee", "Lecture non autorisee\npour cette session.");
+        return;
     }
     int ni = fm_find_child(name);
     if (ni < 0 || g_fs.nodes[ni].is_dir) {
@@ -557,7 +557,8 @@ static void fm_do_paste(LstID lst, LblID lbl_status) {
         app_set_label_text(lbl_status, "Presse-papier vide."); app_set_label_color(lbl_status, FM_STATUS_FG); return;
     }
     if (!session_has_permission(PERM_FS_WRITE)) {
-        app_set_label_text(lbl_status, "Permission refusee : ecriture."); app_set_label_color(lbl_status, FM_STATUS_ERR); return;
+        errwin_error("Permission refusee", "Ecriture non autorisee\npour cette session.");
+        return;
     }
     uint32_t saved_cwd = g_cwd;
     g_cwd = g_fm.clipboard_dir;
@@ -665,6 +666,9 @@ static void fm_update_info_panel(LblID lbl_name,  LblID lbl_type,
 }
 // ============================================================
 void app_fileman_run(void) {
+  int need_restart = 0;
+  do {
+    need_restart = 0;
     app_init();
 
     WinID win = app_new_window("Explorateur — TetraOS",
@@ -790,14 +794,14 @@ void app_fileman_run(void) {
                         if (ci >= 0) fm_navigate_to((uint32_t)ci, lst, lbl_path, lbl_status);
                         else { app_set_label_text(lbl_status, "Dossier introuvable."); app_set_label_color(lbl_status, FM_STATUS_ERR); }
                     } else {
-                        // fm_open_file lance fileeditor/textedit qui font app_init()
-                        // → détruit fileman. On relance fileman au retour.
                         uint32_t saved_dir = g_fm.dir_idx;
                         g_cwd = g_fm.dir_idx;
                         fm_open_file(name, lbl_status);
+                        // app_fileeditor_run a appelé app_init() → widgets détruits.
+                        // On sort de la boucle et on reconstruit fileman (pas de récursion).
                         g_cwd = saved_dir;
-                        app_fileman_run();
-                        return;
+                        g_fm.dir_idx = saved_dir;
+                        need_restart = 1; break;
                     }
                 }
             }
@@ -816,9 +820,9 @@ void app_fileman_run(void) {
         // ── + Dossier ────────────────────────────────────────
         if (app_button_touched(btn_new_dir)) {
             if (!session_has_permission(PERM_FS_WRITE)) {
-                app_set_label_text(lbl_status, "Permission refusee."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                errwin_error("Permission refusee", "Creation de dossier non autorisee\npour cette session.");
             } else if (!fs_acl_check(g_fm.dir_idx, ACL_WRITE)) {
-                app_set_label_text(lbl_status, "Acces refuse (dossier systeme)."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                errwin_error("Acces refuse", "Ecriture interdite dans ce dossier.\n(Dossier systeme ou permissions insuffisantes)");
             } else {
                 char dname[FM_NAME_MAX]; dname[0] = '\0';
                 if (fm_dialog_input("Nouveau dossier", "Nom du dossier :", dname, FM_NAME_MAX)) {
@@ -834,9 +838,9 @@ void app_fileman_run(void) {
         // ── + Fichier ────────────────────────────────────────
         if (app_button_touched(btn_new_fil)) {
             if (!session_has_permission(PERM_FS_WRITE)) {
-                app_set_label_text(lbl_status, "Permission refusee."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                errwin_error("Permission refusee", "Creation de fichier non autorisee\npour cette session.");
             } else if (!fs_acl_check(g_fm.dir_idx, ACL_WRITE)) {
-                app_set_label_text(lbl_status, "Acces refuse (dossier systeme)."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                errwin_error("Acces refuse", "Ecriture interdite dans ce dossier.\n(Dossier systeme ou permissions insuffisantes)");
             } else {
                 char fname[FM_NAME_MAX]; fname[0] = '\0';
                 if (fm_dialog_input("Nouveau fichier", "Nom du fichier :", fname, FM_NAME_MAX)) {
@@ -891,7 +895,7 @@ void app_fileman_run(void) {
         // ── Supprimer ────────────────────────────────────────
         if (app_button_touched(btn_del)) {
             if (!session_has_permission(PERM_FS_DELETE)) {
-                app_set_label_text(lbl_status, "Permission refusee."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                errwin_error("Permission refusee", "Suppression non autorisee\npour cette session.");
             } else if (g_fm.sel_node_idx < 0) {
                 app_set_label_text(lbl_status, "Selectionner un element."); app_set_label_color(lbl_status, FM_STATUS_FG);
             } else {
@@ -911,7 +915,7 @@ void app_fileman_run(void) {
                                 g_fm.sel_node_idx = -1;
                                 fm_populate_list(lst, g_fm.dir_idx);
                             } else {
-                                app_set_label_text(lbl_status, "Echec : dossier non vide ou acces refuse."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                                errwin_error2("Suppression impossible", "Dossier non vide ou acces refuse : ", name);
                             }
                         }
                     }
@@ -933,19 +937,14 @@ void app_fileman_run(void) {
                             if (ci >= 0) fm_navigate_to((uint32_t)ci, lst, lbl_path, lbl_status);
                         } else {
                             if (!session_has_permission(PERM_FS_READ)) {
-                                app_set_label_text(lbl_status, "Permission refusee."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                                errwin_error("Permission refusee", "Lecture non autorisee\npour cette session.");
                             } else {
-                                // app_fileeditor_run fait app_init() → détruit fileman.
-                                // On sauvegarde le répertoire courant, lance l'éditeur,
-                                // puis on relance fileman sur le même dossier au retour.
                                 uint32_t saved_dir = g_fm.dir_idx;
                                 g_cwd = g_fm.dir_idx;
                                 app_fileeditor_run(name);
-                                // Retour de l'éditeur : appcore a été réinitialisé.
-                                // Relancer fileman sur le même dossier.
                                 g_cwd = saved_dir;
-                                app_fileman_run();
-                                return; // ne pas continuer dans l'ancienne boucle
+                                g_fm.dir_idx = saved_dir;
+                                need_restart = 1; break;
                             }
                         }
                     }
@@ -963,7 +962,7 @@ void app_fileman_run(void) {
                     fm_extract_name(line, name, FM_NAME_MAX, &isd);
                     if (!isd && fm_strcmp(fm_get_ext(name), "tex") == 0) {
                         if (!session_has_permission(PERM_TEX_EXECUTE)) {
-                            app_set_label_text(lbl_status, "Permission refusee : execution."); app_set_label_color(lbl_status, FM_STATUS_ERR);
+                            errwin_error("Permission refusee", "Execution de scripts .tex\nnon autorisee pour cette session.");
                         } else {
                             extern int tex_execute(const char*);
                             uint32_t sv = g_cwd; g_cwd = g_fm.dir_idx;
@@ -1009,6 +1008,7 @@ void app_fileman_run(void) {
             }
         }
     }
+  } while (need_restart);
 }
 
 // ── Point d'entrée TEX ───────────────────────────────────────

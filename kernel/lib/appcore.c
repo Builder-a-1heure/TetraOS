@@ -425,6 +425,9 @@ static void redraw_all(void) {
     screen_end_ui();
     mouse_draw_cursor();
 
+    // Flush backbuffer → framebuffer physique (une seule écriture visible)
+    vesa_flip();
+
     // Reset tous les flags dirty
     for (int i=0;i<AC_MAX_WINDOWS;  i++) { g_wins[i].dirty=0; g_wins[i].moved=0; g_wins[i].dirty_title=0; }
     for (int i=0;i<AC_MAX_BUTTONS;  i++) g_btns[i].dirty=0;
@@ -457,6 +460,8 @@ static void redraw_dirty_widgets(void) {
         g_daws[i].dirty=0;
         (void)focus;
     }
+    // Flush partiel aussi — même les updates de widgets doivent être visibles
+    vesa_flip();
     g_redrawn_this_tick=1;
 }
 
@@ -710,8 +715,9 @@ void app_close_window(WinID wid) {
     for (int i=0; i<AC_MAX_LISTBOXES; i++) if (g_lsts[i].used&&g_lsts[i].win==wid) g_lsts[i].used=0;
     for (int i=0; i<AC_MAX_DRAWAREAS; i++) if (g_daws[i].used&&g_daws[i].win==wid) g_daws[i].used=0;
     z_remove(wid);
+    // Marquer toutes les fenêtres restantes dirty pour qu'elles se redessinant.
+    // Ne PAS appeler desktop_run() ici — c'est au caller de gérer son contexte.
     for (int i=0; i<AC_MAX_WINDOWS; i++) if (g_wins[i].used) g_wins[i].dirty=1;
-    desktop_run();
 }
 
 void app_set_title(WinID wid, const char* title) {

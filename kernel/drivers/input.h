@@ -26,4 +26,10 @@ char input_dispatch_char(void);
 // NULL = comportement par défaut (efface/redessine le curseur).
 void input_set_mouse_packet_handler(void (*fn)(void));
 
+// Renvoie 1 s'il reste un octet disponible sur le port 0x60 (status bit0).
+// Permet de drainer complètement le buffer 8042 via input_poll_char()
+// SANS jamais appeler mouse_poll() directement (ce qui avalerait des
+// octets clavier — voir bug desktop_run()).
+int input_has_pending_byte(void);
+
 #endif

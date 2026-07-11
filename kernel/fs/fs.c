@@ -4,6 +4,7 @@
 #include "../gfx/screen.h"
 #include "../drivers/ata.h"
 #include "../ui/session.h"
+#include "../lib/process.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "tex_doc_content.h"
@@ -50,12 +51,20 @@ int fs_acl_check(uint32_t node_idx, AclOp op) {
     uint16_t perms = meta.permissions;
     uint16_t uid   = meta.uid;
 
-    // Session courante
-    int is_admin  = session_is_admin();
-    uint16_t cur_uid = session_get_uid();
-
     // Si aucune session n'existe encore (premier boot), tout est permis
     if (g_session_manager.session_count == 0) return 1;
+
+    // Contexte de l'appelant : utiliser ProcessContext si un process est actif,
+    // sinon fallback sur la session courante (appels kernel directs hors app).
+    int      is_admin;
+    uint16_t cur_uid;
+    if (g_current_process.active) {
+        is_admin = g_current_process.is_admin;
+        cur_uid  = g_current_process.uid;
+    } else {
+        is_admin = session_is_admin();
+        cur_uid  = session_get_uid();
+    }
 
     // Nœuds système (créés par fs_format ou inject_wallpaper) :
     // - Lecture  → tout le monde (comme /etc sous Unix)

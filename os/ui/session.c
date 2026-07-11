@@ -6,6 +6,7 @@
 #include "../drivers/mouse.h"
 #include "../fs/fs.h"
 #include "../lib/utils.h"
+#include "../lib/process.h"
 
 // Gestionnaire global de sessions
 SessionManager g_session_manager;
@@ -567,13 +568,17 @@ int session_has_permission(Permission perm) {
     if (g_session_manager.session_count == 0) {
         return 1;
     }
-    
-    // Si personne n'est connecté mais des sessions existent, refuser
+
+    // Si un processus est actif, utiliser son contexte (snapshot au launch)
+    // plutôt que l'état live de g_session_manager.
+    if (g_current_process.active) {
+        return process_has_permission((int)perm);
+    }
+
+    // Fallback : appel kernel hors contexte app (ex: shell, init)
     if (!g_session_manager.logged_in || !g_session_manager.current_session) {
         return 0;
     }
-    
-    // Vérifier les permissions de la session
     return (g_session_manager.current_session->permissions & (1 << perm)) != 0;
 }
 

@@ -292,7 +292,11 @@ init_pm:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, 0xA00000
+    mov esp, 0x3000000   ; CORRECTION : aligné avec start() dans main.c —
+                          ; 0xA00000 tombe maintenant DANS l'espace kernel
+                          ; (le backbuffer 1920x1080 pousse le kernel jusqu'a
+                          ; ~14 Mo). Stack transitoire, écrasé par start(),
+                          ; mais autant éviter toute corruption même minime.
 
     ; Scanner DEADBEEF de 0x10000 à 0x32000
     mov edi, 0x10000

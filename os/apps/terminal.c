@@ -313,11 +313,30 @@ static void handle_mouse(void) {
         s_closed = 1;
 }
 
+// Même bug que desktop_run() : mouse_poll() en direct avale les octets
+// clavier tapés pendant qu'on est dans le terminal (désync du paquet
+// souris 3-octets). On passe par input_poll_char() qui route correctement
+// via le status byte / mouse_in_packet().
+static volatile int s_term_mouse_pending = 0;
+static void term_on_mouse_packet(void) {
+    s_term_mouse_pending = 1;
+}
+
 static char term_getchar(void) {
     while (1) {
-        // Événements souris
-        int mouse_moved = 0;
-        while (mouse_poll()) mouse_moved = 1;
+        // Draine tout le buffer 8042 disponible en une passe : chaque octet
+        // est routé vers clavier OU souris par input_poll_char() lui-même
+        // (via le status byte + mouse_in_packet()). On récupère le dernier
+        // caractère clavier lu (kc) sans jamais appeler mouse_poll() en direct.
+        int  mouse_moved = 0;
+        char kc = 0;
+        s_term_mouse_pending = 0;
+        while (input_has_pending_byte()) {
+            char r = input_poll_char();
+            if (r) kc = r;
+        }
+        if (s_term_mouse_pending) mouse_moved = 1;
+
         if (mouse_moved) {
             mouse_erase_cursor();
             mouse_draw_cursor();
@@ -325,13 +344,15 @@ static char term_getchar(void) {
             if (s_closed) return 27; // ESC = fermeture
         }
 
-        char c = input_dispatch_char();
-        if (c == 0) continue;
-        if (c == 16) { if (s_view > 0) s_view--;          win_redraw_content(); return 0; }
-        if (c == 14) { int bot = s_row-s_rows_vis+1;
+        if (kc == 0) {
+            __asm__ __volatile__("nop");
+            continue; // rien à traiter, on reboucle (non bloquant)
+        }
+        if (kc == 16) { if (s_view > 0) s_view--;          win_redraw_content(); return 0; }
+        if (kc == 14) { int bot = s_row-s_rows_vis+1;
                        if (bot < 0) bot = 0;
                        if (s_view < bot) s_view++;         win_redraw_content(); return 0; }
-        return c;
+        return kc;
     }
 }
 
@@ -380,6 +401,8 @@ void app_terminal(void) {
 
     // Hook de sortie : print_string/print_char → buffer terminal
     g_print_hook = buf_putchar;
+
+    input_set_mouse_packet_handler(term_on_mouse_packet);
 
     mouse_erase_cursor();
     win_redraw_full();

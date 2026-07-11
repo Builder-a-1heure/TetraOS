@@ -13,6 +13,34 @@ static uint32_t g_height      = 0;
 static uint8_t  g_bpp         = 0;
 static uint32_t g_bpp_bytes   = 0;
 
+// ============================================================
+// Backbuffer — composition par couches sans flicker
+//
+// Toutes les primitives de dessin écrivent ici.
+// vesa_flip() copie le backbuffer dans le framebuffer physique
+// en une seule passe — une seule écriture visible par frame.
+//
+// Taille fixe 800×600×4 = 1.83 MB dans le BSS (pas de coût dans .bin).
+// Si la résolution est plus petite, seule la portion utilisée est blittée.
+// ============================================================
+static uint32_t g_backbuf[VESA_BB_W * VESA_BB_H];
+
+// Retourne un pointeur direct sur le backbuffer (pour wallpaper_blit, etc.)
+uint32_t* vesa_backbuf(void) { return g_backbuf; }
+
+// Flush : copie le backbuffer dans le framebuffer physique.
+// À appeler une fois par frame, après avoir tout composé.
+void vesa_flip(void) {
+    if (!g_vesa_active) return;
+    uint32_t w = g_width  < VESA_BB_W ? g_width  : VESA_BB_W;
+    uint32_t h = g_height < VESA_BB_H ? g_height : VESA_BB_H;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t* dst = (uint32_t*)((uint8_t*)g_fb_addr + y * g_pitch);
+        uint32_t* src = g_backbuf + y * VESA_BB_W;
+        for (uint32_t x = 0; x < w; x++) dst[x] = src[x];
+    }
+}
+
 // Quand activé, draw_glyph_raw ne peint PAS les pixels de fond (bg) —
 // le wallpaper reste visible derrière le texte.
 // Activé par vesa_set_transparent_bg(1) au démarrage du bureau.
@@ -81,10 +109,11 @@ static void dirty_clear(void) {
 void vesa_invalidate_none(void) { dirty_clear(); }
 
 // ============================================================
-// Écriture directe d'un pixel 32bpp (inline pour perf)
-// ============================================================
+// Écriture d'un pixel dans le backbuffer (32bpp uniquement)
+// put32 n'écrit JAMAIS directement dans g_fb_addr — c'est vesa_flip() qui flush.
 static inline void put32(int x, int y, uint32_t color) {
-    *(uint32_t*)((uint8_t*)g_fb_addr + (uint32_t)y * g_pitch + (uint32_t)x * 4) = color;
+    if ((uint32_t)x >= VESA_BB_W || (uint32_t)y >= VESA_BB_H) return;
+    g_backbuf[y * VESA_BB_W + x] = color;
 }
 
 // ============================================================
@@ -208,33 +237,22 @@ void vesa_clear_glyph(int col, int row, uint32_t bg) {
 }
 
 void vesa_put_pixel(int x, int y, uint32_t color) {
-    if ((uint32_t)x >= g_width || (uint32_t)y >= g_height) return;
-    if (g_bpp_bytes == 4) { put32(x, y, color); return; }
-    uint8_t* fb = (uint8_t*)g_fb_addr;
-    uint32_t off = (uint32_t)y * g_pitch + (uint32_t)x * g_bpp_bytes;
-    if (g_bpp_bytes == 3) { fb[off]=color&0xFF; fb[off+1]=(color>>8)&0xFF; fb[off+2]=(color>>16)&0xFF; }
+    if ((uint32_t)x >= VESA_BB_W || (uint32_t)y >= VESA_BB_H) return;
+    g_backbuf[y * VESA_BB_W + x] = color;
 }
 
 uint32_t vesa_get_pixel(int x, int y) {
-    if ((uint32_t)x >= g_width || (uint32_t)y >= g_height) return 0;
-    uint8_t* fb = (uint8_t*)g_fb_addr;
-    uint32_t off = (uint32_t)y * g_pitch + (uint32_t)x * g_bpp_bytes;
-    if (g_bpp_bytes == 4) return *(uint32_t*)(fb + off);
-    if (g_bpp_bytes == 3) return (uint32_t)fb[off] | ((uint32_t)fb[off+1]<<8) | ((uint32_t)fb[off+2]<<16);
-    return 0;
+    if ((uint32_t)x >= VESA_BB_W || (uint32_t)y >= VESA_BB_H) return 0;
+    return g_backbuf[y * VESA_BB_W + x];
 }
 
 void vesa_fill(uint32_t color) {
     if (!g_vesa_active) return;
-    if (g_bpp_bytes == 4) {
-        for (uint32_t y = 0; y < g_height; y++) {
-            uint32_t* line = (uint32_t*)((uint8_t*)g_fb_addr + y * g_pitch);
-            for (uint32_t x = 0; x < g_width; x++) line[x] = color;
-        }
-    } else {
-        for (uint32_t y = 0; y < g_height; y++)
-            for (uint32_t x = 0; x < g_width; x++)
-                vesa_put_pixel((int)x, (int)y, color);
+    uint32_t w = g_width  < VESA_BB_W ? g_width  : VESA_BB_W;
+    uint32_t h = g_height < VESA_BB_H ? g_height : VESA_BB_H;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t* line = g_backbuf + y * VESA_BB_W;
+        for (uint32_t x = 0; x < w; x++) line[x] = color;
     }
     dirty_reset();
 }

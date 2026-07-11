@@ -344,6 +344,15 @@ char input_poll_char(void) {
     return process_keyboard_scancode(scancode);
 }
 
+// Renvoie 1 s'il reste un octet dispo sur le port 0x60 — permet de drainer
+// le buffer 8042 via input_poll_char() sans jamais taper dans mouse_poll()
+// directement.
+int input_has_pending_byte(void) {
+    uint8_t st;
+    __asm__ __volatile__("inb %1, %0" : "=a"(st) : "Nd"((uint16_t)0x64));
+    return (st & STATUS_OUTPUT_FULL) ? 1 : 0;
+}
+
 // BLOQUANT : boucle jusqu'à avoir un vrai caractère clavier.
 char input_dispatch_char(void) {
     while (1) {
