@@ -1,5 +1,4 @@
 # TetraOS
-"Made from AI for AI" ...
 
 TetraOS est un OS barre-métal conçu par un étudiant français sur son temps libre pour s'amuser, bien que purement expérimentale et instructif, il est voué a évolué pour devenir potentiellement utilisable. Le mot clé de TetraOS est de découvrir et reproduire a ma manière le fonctionnement un system d'exploitation.
 
