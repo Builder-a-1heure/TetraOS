@@ -11,7 +11,11 @@ tools/build/compilation/kernel_gfx_wallpaper.o
 tools/build/compilation/kernel_lib_appcore.o
 tools/build/compilation/kernel_lib_boot_info.o
 tools/build/compilation/kernel_lib_errwin.o
+tools/build/compilation/kernel_lib_isr.o
+tools/build/compilation/kernel_lib_pic.o
 tools/build/compilation/kernel_lib_process.o
+tools/build/compilation/kernel_lib_sched.o
+tools/build/compilation/kernel_lib_timer.o
 tools/build/compilation/kernel_lib_utils.o
 tools/build/compilation/kernel_mem_mem_boot.o
 tools/build/compilation/kernel_mem_pfa.o

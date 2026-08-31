@@ -300,8 +300,10 @@ void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alp
     if ((uint32_t)x2 > sw) x2 = (int)sw;
     if ((uint32_t)y2 > sh) y2 = (int)sh;
     if (x2 <= x || y2 <= y) return;
-    uint32_t pitch = vesa_pitch();
-    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
+    // CORRECTION : ciblait vesa_fb_addr() (VRAM directe) alors que le reste
+    // du pipeline compose dans le backbuffer — le prochain vesa_flip()
+    // effaçait ce rectangle. On écrit désormais dans le backbuffer.
+    uint32_t* bb   = vesa_backbuf();
     // Contribution source préfactorisée — constante sur tout le rectangle
     uint32_t sr  = ((color >> 16) & 0xFF) * (uint32_t)alpha;
     uint32_t sg  = ((color >>  8) & 0xFF) * (uint32_t)alpha;
@@ -309,7 +311,7 @@ void gfx_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alp
     uint32_t inv = 255u - (uint32_t)alpha;
     int line_w = x2 - x;
     for (int py = y; py < y2; py++) {
-        uint32_t* row = (uint32_t*)(fb + (uint32_t)py * pitch + (uint32_t)x * 4u);
+        uint32_t* row = bb + (uint32_t)py * VESA_BB_W + (uint32_t)x;
         for (int i = 0; i < line_w; i++) {
             uint32_t dst = row[i];
             uint32_t r   = (sr + ((dst >> 16) & 0xFF) * inv) >> 8;  // /256 ≈ /255
@@ -368,11 +370,12 @@ void gfx_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if ((uint32_t)x2 > sw) x2 = (int)sw;
     if ((uint32_t)y2 > sh) y2 = (int)sh;
     if (x2 <= x || y2 <= y) return;
-    uint32_t pitch = vesa_pitch();
-    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
+    // CORRECTION : idem gfx_fill_rect_blend — cible le backbuffer, pas la
+    // VRAM directe, pour ne plus être effacé par le vesa_flip() suivant.
+    uint32_t* bb    = vesa_backbuf();
     uint32_t line_w = (uint32_t)(x2 - x);
     for (int py = y; py < y2; py++) {
-        uint32_t* dst = (uint32_t*)(fb + (uint32_t)py * pitch + (uint32_t)x * 4u);
+        uint32_t* dst = bb + (uint32_t)py * VESA_BB_W + (uint32_t)x;
         fast_fill_line(dst, color, line_w);
     }
     vesa_invalidate_rect(x, y, x2 - x, y2 - y);
@@ -482,12 +485,11 @@ void gfx_gradient_h(int x, int y, int w, int h,
         uint8_t b = (uint8_t)(b0 + (b1 - b0) * col / denom);
         s_grad_h_line[col] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
     }
-    // Recopier avec rep movsd — une seule passe mémoire par rangée
-    uint32_t pitch = vesa_pitch();
-    uint8_t* fb    = (uint8_t*)vesa_fb_addr();
+    // Recopier avec rep movsd — une seule passe mémoire par rangée.
+    // CORRECTION : cible désormais le backbuffer (pas la VRAM directe).
+    uint32_t* bb = vesa_backbuf();
     for (int row = 0; row < y2 - y; row++) {
-        uint32_t* dst_row = (uint32_t*)(fb + (uint32_t)(y + row) * pitch
-                                           + (uint32_t)x * 4u);
+        uint32_t* dst_row = bb + (uint32_t)(y + row) * VESA_BB_W + (uint32_t)x;
         fast_memcpy_u32(dst_row, s_grad_h_line, (uint32_t)real_w);
     }
     vesa_invalidate_rect(x, y, real_w, y2 - y);
@@ -504,8 +506,8 @@ void gfx_gradient_v(int x, int y, int w, int h,
     if (x < 0) x = 0; if (y < 0) y = 0;
     if (x2 <= x || y2 <= y) return;
     uint32_t line_w = (uint32_t)(x2 - x);
-    uint32_t pitch  = vesa_pitch();
-    uint8_t* fb     = (uint8_t*)vesa_fb_addr();
+    // CORRECTION : cible désormais le backbuffer (pas la VRAM directe).
+    uint32_t* bb    = vesa_backbuf();
     int r0 = (col_top >> 16) & 0xFF, r1 = (col_bot >> 16) & 0xFF;
     int g0 = (col_top >>  8) & 0xFF, g1 = (col_bot >>  8) & 0xFF;
     int b0 = (col_top      ) & 0xFF, b1 = (col_bot      ) & 0xFF;
@@ -516,7 +518,7 @@ void gfx_gradient_v(int x, int y, int w, int h,
         uint8_t g = (uint8_t)(g0 + (g1 - g0) * row / denom);
         uint8_t b = (uint8_t)(b0 + (b1 - b0) * row / denom);
         uint32_t c = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-        uint32_t* dst = (uint32_t*)(fb + (uint32_t)(y + row) * pitch + (uint32_t)x * 4u);
+        uint32_t* dst = bb + (uint32_t)(y + row) * VESA_BB_W + (uint32_t)x;
         fast_fill_line(dst, c, line_w);  // rep stosd sur toute la ligne
     }
     vesa_invalidate_rect(x, y, x2 - x, y2 - y);

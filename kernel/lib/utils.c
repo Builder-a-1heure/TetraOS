@@ -4,17 +4,46 @@
 
 // Fonctions de mémoire
 void* memcpy(void* dest, const void* src, size_t n) {
-    char* d = dest;
-    const char* s = src;
-    while (n--) {
-        *d++ = *s++;
-    }
+    // CORRECTION PERF : avant, copie OCTET PAR OCTET (`while(n--) *d++=*s++`).
+    // Pour un flip d'écran 1920x1080x32bpp (8,3 Mo), ça fait 8,3 millions
+    // d'itérations d'une boucle scalaire — canon principal de la lenteur
+    // "30 secondes pour changer les pixels".
+    // `rep movsl` copie par mots de 4 octets via une instruction CPU dédiée
+    // (bien plus rapide que la boucle C, indépendamment du niveau
+    // d'optimisation de compilation) ; le reste (0-3 octets) est copié au cas par cas.
+    uint8_t*       d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+    size_t words = n / 4;
+    size_t rem   = n % 4;
+
+    __asm__ volatile (
+        "rep movsl"
+        : "+D"(d), "+S"(s), "+c"(words)
+        :
+        : "memory"
+    );
+
+    while (rem--) *d++ = *s++;
     return dest;
 }
 
 void* memset(void* ptr, int value, size_t num) {
-    unsigned char* p = ptr;
-    while (num--) *p++ = (unsigned char)value;
+    // Même optimisation que memcpy : rep stosl par mots de 4 octets.
+    uint8_t* p = (uint8_t*)ptr;
+    uint8_t  b = (uint8_t)value;
+    uint32_t v32 = (uint32_t)b * 0x01010101u; // réplique l'octet sur les 4
+
+    size_t words = num / 4;
+    size_t rem   = num % 4;
+
+    __asm__ volatile (
+        "rep stosl"
+        : "+D"(p), "+c"(words)
+        : "a"(v32)
+        : "memory"
+    );
+
+    while (rem--) *p++ = b;
     return ptr;
 }
 

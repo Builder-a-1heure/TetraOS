@@ -293,9 +293,10 @@ void mouse_erase_cursor(void) {
     }
 
     // Invalider les cellules de la grille glyphe recouvertes par le curseur.
-    // vesa_put_pixel() écrit directement dans le framebuffer en bypassant
-    // le dirty tracker — sans invalidation, vesa_draw_glyph() croirait les
-    // cellules inchangées et ne redessinerait pas le texte qui était dessous.
+    // vesa_put_pixel() écrit dans le backbuffer en bypassant le dirty
+    // tracker de vesa_draw_glyph() — sans invalidation explicite ici,
+    // vesa_draw_glyph() croirait les cellules inchangées et ne redessinerait
+    // pas le texte qui était dessous.
     int cell_x0 = g_cursor_saved_x / FONT_W;
     int cell_y0 = g_cursor_saved_y / FONT_H;
     int cell_x1 = (g_cursor_saved_x + CW - 1) / FONT_W;

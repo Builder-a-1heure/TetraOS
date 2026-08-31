@@ -1,6 +1,8 @@
 #include "../drivers/vesa.h"
 #include "../drivers/vesa_font.h"
+#include "../lib/utils.h"
 #include <stdint.h>
+#include <stddef.h>
 
 // ============================================================
 // État VESA
@@ -30,14 +32,62 @@ uint32_t* vesa_backbuf(void) { return g_backbuf; }
 
 // Flush : copie le backbuffer dans le framebuffer physique.
 // À appeler une fois par frame, après avoir tout composé.
+//
+// CORRECTION PERF : avant, double boucle pixel par pixel (`dst[x]=src[x]`)
+// — à 1920x1080, ça fait 2 073 600 itérations scalaires par frame, sans
+// compter que le kernel compilait sans -O2 (voir make.sh). Combiné à
+// l'agrandissement du backbuffer 800x600->1920x1080, c'était devenu
+// injouable ("30 secondes pour changer les pixels").
+// Le cas courant (backbuffer == résolution réelle, pitch cohérent) est
+// maintenant UNE SEULE copie mémoire contiguë via memcpy (rep movsl).
 void vesa_flip(void) {
     if (!g_vesa_active) return;
     uint32_t w = g_width  < VESA_BB_W ? g_width  : VESA_BB_W;
     uint32_t h = g_height < VESA_BB_H ? g_height : VESA_BB_H;
+
+    // Cas rapide (mode natif, 32bpp) : le backbuffer couvre exactement
+    // l'écran et le pitch physique correspond exactement à sa largeur ->
+    // tout est contigu, une seule grosse copie suffit.
+    if (g_bpp_bytes == 4 && w == VESA_BB_W && h == VESA_BB_H && g_pitch == VESA_BB_W * 4) {
+        memcpy((void*)(uintptr_t)g_fb_addr, g_backbuf,
+               (size_t)VESA_BB_W * VESA_BB_H * 4);
+        return;
+    }
+
+    if (g_bpp_bytes == 4) {
+        // Résolution physique plus petite que le backbuffer, ou pitch
+        // différent : copie ligne par ligne via memcpy plutôt que
+        // pixel par pixel.
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t*  dst = (uint8_t*)(uintptr_t)g_fb_addr + y * g_pitch;
+            uint32_t* src = g_backbuf + y * VESA_BB_W;
+            memcpy(dst, src, (size_t)w * 4);
+        }
+        return;
+    }
+
+    // CORRECTION : modes 16/24bpp — auparavant ignorés par vesa_flip()
+    // (le memcpy brut supposait toujours du 32bpp), ce qui aurait produit
+    // un écran corrompu si le BIOS négociait autre chose que du 32bpp.
+    // On convertit pixel par pixel depuis le backbuffer ARGB 32bpp.
     for (uint32_t y = 0; y < h; y++) {
-        uint32_t* dst = (uint32_t*)((uint8_t*)g_fb_addr + y * g_pitch);
         uint32_t* src = g_backbuf + y * VESA_BB_W;
-        for (uint32_t x = 0; x < w; x++) dst[x] = src[x];
+        uint8_t*  dst = (uint8_t*)(uintptr_t)g_fb_addr + y * g_pitch;
+        if (g_bpp_bytes == 3) {
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t c = src[x];
+                dst[x*3+0] = c & 0xFF;
+                dst[x*3+1] = (c >> 8) & 0xFF;
+                dst[x*3+2] = (c >> 16) & 0xFF;
+            }
+        } else if (g_bpp_bytes == 2) {
+            uint16_t* dst16 = (uint16_t*)dst;
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t c = src[x];
+                uint16_t r5 = (c >> 16) & 0xFF, g6 = (c >> 8) & 0xFF, b5 = c & 0xFF;
+                dst16[x] = (uint16_t)(((r5 >> 3) << 11) | ((g6 >> 2) << 5) | (b5 >> 3));
+            }
+        }
     }
 }
 
@@ -117,59 +167,58 @@ static inline void put32(int x, int y, uint32_t color) {
 }
 
 // ============================================================
-// Dessin d'un glyphe — chemin critique optimisé 32bpp
+// Dessin d'un glyphe — chemin critique, cible le BACKBUFFER
+//
+// CORRECTION BUG MAJEUR : cette fonction écrivait auparavant DIRECTEMENT
+// dans g_fb_addr (VRAM physique), alors que le reste du pipeline (wallpaper,
+// curseur souris via vesa_put_pixel/get_pixel) compose tout dans g_backbuf
+// et ne présente qu'au travers de vesa_flip(). Résultat : deux chemins de
+// dessin concurrents sur la MÊME zone d'écran —
+//   1) le texte apparaissait immédiatement (écriture VRAM directe, lente
+//      car non cachée) mais
+//   2) le moindre vesa_flip() suivant (appelé après composition du bureau,
+//      voir appcore.c/desktop.c) recopiait le backbuffer par-dessus et
+//      EFFAÇAIT ce texte, puisque le backbuffer ne l'avait jamais reçu.
+// D'où le clignotement / texte qui disparaît / lenteur ("ça galère") —
+// chaque glyphe faisait en plus des écritures MMIO non batchées au lieu
+// d'écritures RAM classiques.
+//
+// Fix : on écrit exclusivement dans g_backbuf (32bpp, stride VESA_BB_W).
+// La conversion vers le bpp physique réel (16/24/32) est centralisée dans
+// vesa_flip(), seul point d'écriture vers g_fb_addr.
 // ============================================================
 static void draw_glyph_raw(int px, int py, char c, uint32_t fg, uint32_t bg) {
     const uint8_t* glyph = vga_font[(uint8_t)c];
 
-    if (g_bpp_bytes == 4) {
-        for (int row = 0; row < FONT_H; row++) {
-            int y = py + row;
-            if ((uint32_t)y >= g_height) break;
-            uint32_t* line = (uint32_t*)((uint8_t*)g_fb_addr + (uint32_t)y * g_pitch + (uint32_t)px * 4);
-            uint8_t bits = glyph[row];
-            if (g_transparent_bg) {
-                // Mode bureau : ne peindre que les pixels FG (texte),
-                // laisser le wallpaper intact sur les pixels de fond.
-                if (bits & 0x80) line[0] = fg;
-                if (bits & 0x40) line[1] = fg;
-                if (bits & 0x20) line[2] = fg;
-                if (bits & 0x10) line[3] = fg;
-                if (bits & 0x08) line[4] = fg;
-                if (bits & 0x04) line[5] = fg;
-                if (bits & 0x02) line[6] = fg;
-                if (bits & 0x01) line[7] = fg;
-            } else {
-                line[0] = (bits & 0x80) ? fg : bg;
-                line[1] = (bits & 0x40) ? fg : bg;
-                line[2] = (bits & 0x20) ? fg : bg;
-                line[3] = (bits & 0x10) ? fg : bg;
-                line[4] = (bits & 0x08) ? fg : bg;
-                line[5] = (bits & 0x04) ? fg : bg;
-                line[6] = (bits & 0x02) ? fg : bg;
-                line[7] = (bits & 0x01) ? fg : bg;
-            }
-        }
-    } else {
-        // 24bpp / 16bpp
-        uint8_t* fb = (uint8_t*)g_fb_addr;
-        for (int row = 0; row < FONT_H; row++) {
-            int y = py + row;
-            if ((uint32_t)y >= g_height) break;
-            uint8_t bits = glyph[row];
-            uint32_t base = (uint32_t)y * g_pitch + (uint32_t)px * g_bpp_bytes;
-            for (int col = 0; col < FONT_W; col++) {
-                uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
-                uint32_t off = base + (uint32_t)col * g_bpp_bytes;
-                if (g_bpp_bytes == 3) {
-                    fb[off+0] = color & 0xFF;
-                    fb[off+1] = (color >> 8) & 0xFF;
-                    fb[off+2] = (color >> 16) & 0xFF;
-                } else if (g_bpp_bytes == 2) {
-                    uint16_t r5 = (color>>16)&0xFF, g6=(color>>8)&0xFF, b5=color&0xFF;
-                    *(uint16_t*)(fb+off) = (uint16_t)(((r5>>3)<<11)|((g6>>2)<<5)|(b5>>3));
-                }
-            }
+    for (int row = 0; row < FONT_H; row++) {
+        int y = py + row;
+        if ((uint32_t)y >= VESA_BB_H || (uint32_t)y >= g_height) break;
+        if ((uint32_t)px >= VESA_BB_W) break;
+        uint32_t* line = g_backbuf + (uint32_t)y * VESA_BB_W + (uint32_t)px;
+        uint8_t bits = glyph[row];
+        // Clamp si le glyphe déborde le bord droit du backbuffer
+        int max_col = (int)VESA_BB_W - px;
+        if (max_col > FONT_W) max_col = FONT_W;
+        if (g_transparent_bg) {
+            // Mode bureau : ne peindre que les pixels FG (texte),
+            // laisser le wallpaper intact sur les pixels de fond.
+            if (max_col > 0 && (bits & 0x80)) line[0] = fg;
+            if (max_col > 1 && (bits & 0x40)) line[1] = fg;
+            if (max_col > 2 && (bits & 0x20)) line[2] = fg;
+            if (max_col > 3 && (bits & 0x10)) line[3] = fg;
+            if (max_col > 4 && (bits & 0x08)) line[4] = fg;
+            if (max_col > 5 && (bits & 0x04)) line[5] = fg;
+            if (max_col > 6 && (bits & 0x02)) line[6] = fg;
+            if (max_col > 7 && (bits & 0x01)) line[7] = fg;
+        } else {
+            if (max_col > 0) line[0] = (bits & 0x80) ? fg : bg;
+            if (max_col > 1) line[1] = (bits & 0x40) ? fg : bg;
+            if (max_col > 2) line[2] = (bits & 0x20) ? fg : bg;
+            if (max_col > 3) line[3] = (bits & 0x10) ? fg : bg;
+            if (max_col > 4) line[4] = (bits & 0x08) ? fg : bg;
+            if (max_col > 5) line[5] = (bits & 0x04) ? fg : bg;
+            if (max_col > 6) line[6] = (bits & 0x02) ? fg : bg;
+            if (max_col > 7) line[7] = (bits & 0x01) ? fg : bg;
         }
     }
 }

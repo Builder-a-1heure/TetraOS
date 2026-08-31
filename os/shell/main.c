@@ -23,6 +23,9 @@
 #include "../ui/desktop.h"
 #include "../lib/utils.h"
 #include "../lib/io.h"
+#include "../lib/idt.h"
+#include "../lib/timer.h"
+#include "../lib/sched.h"
 #include <stdint.h>
 
 __attribute__((naked)) __attribute__((section(".text.start")))
@@ -96,6 +99,21 @@ void kmain(void) {
 
     print_string("ETAPE 6 : Initialisation souris PS/2\n");
     mouse_init();
+
+    print_string("ETAPE 7 : Initialisation IDT/PIC/Timer\n");
+    idt_init();     // charge l'IDT + remappe le PIC (IRQ0-15 -> 32-47), tout masque
+    timer_init(100); // IRQ0 a 100 Hz, demasque cette IRQ (les autres restent masquees)
+
+    print_string("ETAPE 8 : Initialisation du scheduler\n");
+    sched_init(); // tache 0 ("main") = continuation de ce kmain(). Doit venir
+                  // APRES timer_init() (branche la preemption sur son tick).
+                  // Tant qu'aucun thread_create() n'est appele, comportement
+                  // strictement identique a avant (mono-tache).
+
+    interrupts_enable(); // sti — a partir d'ici les interruptions matérielles marchent.
+    // NOTE : clavier (IRQ1) et souris (IRQ12) restent volontairement masquees.
+    // Le polling existant (input_poll_char(), mouse_poll()) continue de fonctionner
+    // sans changement — les faire passer en IRQ est un futur refactor a part.
 
     // Boucle principale : login -> bureau -> logout -> login
     while (1) {

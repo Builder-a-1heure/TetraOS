@@ -74,7 +74,7 @@ KERNEL_SECTORS=1200
 # Fichier de liste transmis au linker
 OBJ_LIST="$OBJ/link_objects.txt"
 
-CFLAGS="-ffreestanding -Wall -Wextra -nostdlib -g \
+CFLAGS="-ffreestanding -O2 -Wall -Wextra -nostdlib -g \
     -Ikernel/drivers \
     -Ikernel/gfx \
     -Ikernel/mem \

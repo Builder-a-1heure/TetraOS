@@ -2,6 +2,7 @@
 #include "../gfx/vesaanim.h"
 #include "../drivers/vesa.h"
 #include "../drivers/vesa_font.h"
+#include "../lib/io.h"
 #include <stdint.h>
 
 // ============================================================
@@ -127,15 +128,43 @@ static void draw_text_centered_px(int cx, int y, const char* str,
 }
 
 // ============================================================
-// Timer busy-wait (calibration approximative)
-// En bare-metal on n'a pas usleep — on boucle dans le vide.
-// Ajuste LOOP_PER_MS selon la vitesse de ta machine.
+// Timer précis basé sur le PIT (8253/8254), channel 2, mode one-shot.
+//
+// AVANT : busy-wait calibré en dur (LOOPS_PER_MS = 50000 nop). Ça part du
+// principe que le CPU exécute toujours le même nombre d'instructions par
+// milliseconde — faux dès que la machine/l'émulation QEMU tourne à une
+// vitesse différente de celle où la constante a été calibrée. D'où les
+// "3 secondes par frame" au lieu des 18ms voulus.
+//
+// APRÈS : on utilise le PIT (fréquence fixe et connue : 1 193 182 Hz,
+// indépendante du CPU) en channel 2 — le même canal que le haut-parleur
+// PC, mais on garde le bit "speaker data" à 0 pour ne rien faire sonner.
+// On le charge en mode one-shot (mode 0) avec le nombre de ticks voulu,
+// puis on poll le bit OUT2 (bit 5 du port 0x61) qui passe à 1 quand le
+// compteur atteint 0. Aucune IDT/IRQ nécessaire — juste du polling I/O.
 // ============================================================
-#define LOOPS_PER_MS 50000
+#define PIT_FREQ_HZ 1193182u
 
 static void delay_ms(int ms) {
-    volatile int n = ms * LOOPS_PER_MS;
-    while (n-- > 0) __asm__ volatile("nop");
+    if (ms <= 0) return;
+    uint32_t remaining = (PIT_FREQ_HZ / 1000u) * (uint32_t)ms;
+
+    // Le compteur PIT est sur 16 bits → ~54,9 ms max par charge.
+    // On découpe les délais plus longs en plusieurs charges successives.
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > 0xFFFFu) ? 0xFFFFu : remaining;
+        remaining -= chunk;
+
+        // GATE2 = 1 (démarre le comptage), SPKR data = 0 (silencieux)
+        outb(0x61, (inb(0x61) & 0xFDu) | 0x01u);
+        // Channel 2, accès lo/hi byte, mode 0 (terminal count), binaire
+        outb(0x43, 0xB0);
+        outb(0x42, (uint8_t)(chunk & 0xFF));
+        outb(0x42, (uint8_t)((chunk >> 8) & 0xFF));
+
+        // Attendre que OUT2 passe à 1 (compteur arrivé à 0)
+        while (!(inb(0x61) & 0x20)) { __asm__ volatile("nop"); }
+    }
 }
 
 // ============================================================
@@ -151,8 +180,8 @@ static void delay_ms(int ms) {
 #define ARC_LEN     4       // longueur de l'arc lumineux
 #define SPIN_R      36      // rayon du spinner (px)
 #define DOT_R       4       // rayon de chaque point (px)
-#define SPIN_FRAMES 10      // frames par tour complet
-#define N_LOOPS     1       // nombre de tours avant de finir
+#define SPIN_FRAMES 600      // frames par tour complet
+#define N_LOOPS     5       // nombre de tours avant de finir
 
 void vesa_boot_anim(void) {
     if (!vesa_active()) return;
